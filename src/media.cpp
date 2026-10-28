@@ -25,6 +25,14 @@ bool loadImage(const std::string& path, int maxTextureSize, Image& out, std::str
         return false;
     }
 
+    // Premultiply so mipmaps don't pull dark fringes in from transparent pixels;
+    // the shader divides the alpha back out before blending.
+    const size_t pixelCount = (size_t)width * height;
+    for (size_t i = 0; i < pixelCount; ++i) {
+        stbi_uc* p = pixels + i * 4;
+        for (int c = 0; c < 3; ++c) p[c] = (stbi_uc)((p[c] * p[3] + 127) / 255);
+    }
+
     GLuint texture = 0;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);

@@ -1,6 +1,14 @@
 #pragma once
 
+#include <vector>
+
 #include "mesh.h"
+
+// Layers drawn in one pass; each needs its own texture unit (OpenGL 3.3 guarantees 16).
+constexpr int kMaxLayers = 15;
+
+enum class BlendMode { Normal, Add, Multiply, Screen, Mask, Count };
+const char* blendModeName(BlendMode mode);
 
 // Orbit camera around a target point, in metres.
 struct OrbitCamera {
@@ -18,13 +26,30 @@ struct OrbitCamera {
     void viewProjection(float aspect, float out[16]) const;
 };
 
-struct ViewSettings {
-    int channel = -1;         // UV channel to show, or -1 for the bare mesh
-    unsigned texture = 0;     // image on that channel, or 0 for the UV test grid
+constexpr int kAllSurfaces = -1;
+constexpr int kProjectionSurfaces = -2;  // every surface not marked as LED
+
+// One layer as the renderer needs it. Layers are listed bottom to top.
+struct RenderLayer {
+    unsigned texture = 0;
+    int channel = 0;          // UV channel the media is mapped through
+    int surface = kAllSurfaces;  // a surface index, kAllSurfaces or kProjectionSurfaces
+    BlendMode blend = BlendMode::Normal;
+    float opacity = 1.0f;
     bool clamp = true;        // hide content outside the 0-1 UV square
+};
+
+enum class ViewMode { Layers, MeshOnly, TestGrid };
+
+struct ViewSettings {
+    ViewMode mode = ViewMode::Layers;
+    std::vector<RenderLayer> layers;  // at most kMaxLayers, bottom to top
+    int gridChannel = 0;              // channel shown by the UV test grid
+    bool gridClamp = true;
     bool wireframe = false;
     bool grid = true;
-    float scale = 1.0f;       // user scale factor applied to the mesh
+    float scale = 1.0f;               // user scale factor applied to the mesh
+    std::vector<unsigned char> ledSurfaces;  // 1 per LED surface, indexed by surface
 };
 
 // Draws the mesh into an offscreen colour buffer that the UI shows as an image.
@@ -38,6 +63,7 @@ public:
 
 private:
     void resizeTarget(int width, int height);
+    void uploadLedSurfaces(const std::vector<unsigned char>& flags);
 
     unsigned meshProgram_ = 0;
     unsigned lineProgram_ = 0;
@@ -45,6 +71,9 @@ private:
     unsigned gridVao_ = 0, gridVbo_ = 0;
     int meshVertexCount_ = 0;
     int gridVertexCount_ = 0;
+    unsigned ledTexture_ = 0;
+    std::vector<unsigned char> ledUploaded_;
+    bool ledValid_ = false;
     unsigned framebuffer_ = 0, colorTexture_ = 0, depthBuffer_ = 0;
     int targetWidth_ = 0, targetHeight_ = 0;
 };

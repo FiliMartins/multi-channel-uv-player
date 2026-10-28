@@ -66,11 +66,9 @@ bool Mesh::load(const std::string& filePath, std::string& error) {
         const ufbx_mesh* mesh = node->mesh;
         if (!mesh) continue;
 
-        Surface surface;
-        surface.name = node->name.length > 0 ? std::string(node->name.data, node->name.length)
-                                             : "Surface " + std::to_string(surfaces.size() + 1);
-        surface.firstVertex = (uint32_t)vertexCount();
-
+        const std::string nodeName = node->name.length > 0
+                                         ? std::string(node->name.data, node->name.length)
+                                         : "Surface " + std::to_string(surfaces.size() + 1);
         const int meshChannels = std::min((int)mesh->uv_sets.count, channelCount);
         for (int c = 0; c < meshChannels; ++c) {
             UvChannelInfo& channel = channels[c];
@@ -78,47 +76,71 @@ bool Mesh::load(const std::string& filePath, std::string& error) {
                 const ufbx_string& name = mesh->uv_sets.data[c].name;
                 channel.name = std::string(name.data, name.length);
             }
-            channel.surfaceCount++;
         }
-
         triangleIndices.resize(mesh->max_face_triangles * 3);
-        for (const ufbx_face& face : mesh->faces) {
-            const uint32_t triangles =
-                ufbx_triangulate_face(triangleIndices.data(), triangleIndices.size(), mesh, face);
-            for (uint32_t i = 0; i < triangles * 3; ++i) {
-                const uint32_t index = triangleIndices[i];
-                const ufbx_vec3 local = ufbx_get_vertex_vec3(&mesh->vertex_position, index);
-                const ufbx_vec3 world = ufbx_transform_position(&node->geometry_to_world, local);
-                const float position[3] = {(float)world.x, (float)world.y, (float)world.z};
-                for (int axis = 0; axis < 3; ++axis) {
-                    boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
-                    boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
-                    vertices.push_back(position[axis]);
-                }
-                for (int c = 0; c < kMaxUvChannels; ++c) {
-                    if (c >= meshChannels) {
-                        vertices.push_back(kMissingUv);
-                        vertices.push_back(kMissingUv);
-                        continue;
-                    }
-                    const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->uv_sets.data[c].vertex_uv, index);
-                    const float u = (float)uv.x, v = (float)uv.y;
-                    vertices.push_back(u);
-                    vertices.push_back(v);
 
-                    UvChannelInfo& channel = channels[c];
-                    channel.minU = std::min(channel.minU, u);
-                    channel.maxU = std::max(channel.maxU, u);
-                    channel.minV = std::min(channel.minV, v);
-                    channel.maxV = std::max(channel.maxV, v);
-                    cornerCount[c]++;
-                    if (insideUnitSquare(u, v)) insideCount[c]++;
+        // Each object is a surface; an object with several materials is split
+        // into one surface per material.
+        const bool splitByMaterial = mesh->material_parts.count > 1;
+        const size_t partCount = splitByMaterial ? mesh->material_parts.count : 1;
+        for (size_t part = 0; part < partCount; ++part) {
+            Surface surface;
+            surface.name = nodeName;
+            if (splitByMaterial) {
+                const ufbx_material* material =
+                    part < mesh->materials.count ? mesh->materials.data[part] : nullptr;
+                surface.name += " / " + (material && material->name.length > 0
+                                             ? std::string(material->name.data, material->name.length)
+                                             : "Material " + std::to_string(part + 1));
+            }
+            surface.firstVertex = (uint32_t)vertexCount();
+            const float surfaceIndex = (float)surfaces.size();
+
+            const size_t faceCount = splitByMaterial ? mesh->material_parts.data[part].face_indices.count
+                                                     : mesh->faces.count;
+            for (size_t f = 0; f < faceCount; ++f) {
+                const ufbx_face face =
+                    mesh->faces.data[splitByMaterial ? mesh->material_parts.data[part].face_indices.data[f] : f];
+                const uint32_t triangles =
+                    ufbx_triangulate_face(triangleIndices.data(), triangleIndices.size(), mesh, face);
+                for (uint32_t i = 0; i < triangles * 3; ++i) {
+                    const uint32_t index = triangleIndices[i];
+                    const ufbx_vec3 local = ufbx_get_vertex_vec3(&mesh->vertex_position, index);
+                    const ufbx_vec3 world = ufbx_transform_position(&node->geometry_to_world, local);
+                    const float position[3] = {(float)world.x, (float)world.y, (float)world.z};
+                    for (int axis = 0; axis < 3; ++axis) {
+                        boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
+                        boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
+                        vertices.push_back(position[axis]);
+                    }
+                    vertices.push_back(surfaceIndex);
+                    for (int c = 0; c < kMaxUvChannels; ++c) {
+                        if (c >= meshChannels) {
+                            vertices.push_back(kMissingUv);
+                            vertices.push_back(kMissingUv);
+                            continue;
+                        }
+                        const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->uv_sets.data[c].vertex_uv, index);
+                        const float u = (float)uv.x, v = (float)uv.y;
+                        vertices.push_back(u);
+                        vertices.push_back(v);
+
+                        UvChannelInfo& channel = channels[c];
+                        channel.minU = std::min(channel.minU, u);
+                        channel.maxU = std::max(channel.maxU, u);
+                        channel.minV = std::min(channel.minV, v);
+                        channel.maxV = std::max(channel.maxV, v);
+                        cornerCount[c]++;
+                        if (insideUnitSquare(u, v)) insideCount[c]++;
+                    }
                 }
             }
-        }
 
-        surface.vertexCount = (uint32_t)vertexCount() - surface.firstVertex;
-        if (surface.vertexCount > 0) surfaces.push_back(surface);
+            surface.vertexCount = (uint32_t)vertexCount() - surface.firstVertex;
+            if (surface.vertexCount == 0) continue;
+            for (int c = 0; c < meshChannels; ++c) channels[c].surfaceCount++;
+            surfaces.push_back(surface);
+        }
     }
     ufbx_free_scene(scene);
 
@@ -141,7 +163,7 @@ bool Mesh::load(const std::string& filePath, std::string& error) {
             if (channels[earlier].duplicateOf >= 0) continue;
             bool same = true;
             for (size_t i = 0; i < count && same; ++i) {
-                const float* uvs = &vertices[i * kVertexFloats + 3];
+                const float* uvs = &vertices[i * kVertexFloats + kUvOffset];
                 same = std::fabs(uvs[c * 2] - uvs[earlier * 2]) <= kDuplicateEpsilon &&
                        std::fabs(uvs[c * 2 + 1] - uvs[earlier * 2 + 1]) <= kDuplicateEpsilon;
             }

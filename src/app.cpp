@@ -16,8 +16,10 @@
 namespace {
 
 const char* kProjectWindow = "Project";
+const char* kLayersWindow = "Layers";
 const char* kViewportWindow = "3D View";
 const char* kLogWindow = "Log";
+const char* kLayerPayload = "LAYER_INDEX";
 
 const ImVec4 kWarningColor(0.95f, 0.75f, 0.30f, 1.0f);
 const ImVec4 kMutedColor(0.55f, 0.57f, 0.62f, 1.0f);
@@ -40,6 +42,36 @@ std::string lowerExtension(const std::string& path) {
     return extension;
 }
 
+// Lower-case letters and digits only, so "Wall 1", "wall_1" and "WALL-1" all match.
+std::string normalizedName(const std::string& text) {
+    std::string result;
+    for (unsigned char c : text)
+        if (std::isalnum(c)) result += (char)std::tolower(c);
+    return result;
+}
+
+// Drops UV tags such as "uv01" from a normalized name, so a surface called
+// "Wall 1 uv01" still matches a file called "Wall_1_UV1.png".
+std::string withoutUvTags(const std::string& name) {
+    std::string result;
+    for (size_t i = 0; i < name.size();) {
+        size_t digits = 0;
+        if (name.compare(i, 2, "uv") == 0)
+            while (i + 2 + digits < name.size() && std::isdigit((unsigned char)name[i + 2 + digits])) ++digits;
+        if (digits == 1 || digits == 2) {
+            i += 2 + digits;
+        } else {
+            result += name[i];
+            ++i;
+        }
+    }
+    return result;
+}
+
+std::string sizeText(int width, int height) {
+    return std::to_string(width) + " x " + std::to_string(height) + " px";
+}
+
 }  // namespace
 
 bool App::init(int maxTextureSize) {
@@ -50,7 +82,7 @@ bool App::init(int maxTextureSize) {
 }
 
 void App::shutdown() {
-    for (ChannelState& channel : channels_) freeImage(channel.image);
+    for (Layer& layer : layers_) freeImage(layer.image);
     renderer_.shutdown();
 }
 
@@ -65,8 +97,138 @@ std::string App::channelLabel(int channel) const {
     return label;
 }
 
+std::string App::surfaceLabel(int surface) const {
+    if (surface < 0 || surface >= (int)mesh_.surfaces.size()) return "All surfaces";
+    return mesh_.surfaces[surface].name;
+}
+
+std::string App::placementLabel(int channel, int surface) const {
+    if (surface >= 0) return channelLabel(channel) + ", " + surfaceLabel(surface);
+    if (channel == 0 && anyLedSurface() && anyProjectionSurface()) return channelLabel(channel) + ", projection surfaces";
+    return channelLabel(channel);
+}
+
 bool App::channelUsable(int channel) const {
     return channel >= 0 && channel < (int)channels_.size() && !channels_[channel].ignored;
+}
+
+bool App::isLedSurface(int surface) const {
+    if (surface < 0 || surface >= (int)mesh_.surfaces.size()) return false;
+    if (mode_ == MappingMode::Led) return true;
+    return mode_ == MappingMode::Mixed && surface < (int)mixedLed_.size() && mixedLed_[surface];
+}
+
+bool App::anyLedSurface() const {
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s)
+        if (isLedSurface(s)) return true;
+    return false;
+}
+
+bool App::anyProjectionSurface() const {
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s)
+        if (!isLedSurface(s)) return true;
+    return false;
+}
+
+// UV01 on an LED surface has its own canvas per surface.
+bool App::perSurface(int channel, int surface) const {
+    return channel == 0 && isLedSurface(surface);
+}
+
+// A UV01 layer must name its surface when no projection surface could take it.
+bool App::needsSurface(int channel) const {
+    return channel == 0 && anyLedSurface() && !anyProjectionSurface();
+}
+
+int App::selectedIndex() const {
+    for (int i = 0; i < (int)layers_.size(); ++i)
+        if (layers_[i].id == selectedLayer_) return i;
+    return -1;
+}
+
+int App::matchSurface(const std::string& fileName) const {
+    const std::string name = withoutUvTags(normalizedName(fileName));
+    int best = -1;
+    size_t bestLength = 0;
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
+        const std::string surface = withoutUvTags(normalizedName(mesh_.surfaces[s].name));
+        // The longest match wins, so "Wall_10" picks "Wall 10" over "Wall 1".
+        if (!surface.empty() && surface.size() > bestLength && name.find(surface) != std::string::npos) {
+            best = s;
+            bestLength = surface.size();
+        }
+    }
+    return best;
+}
+
+void App::setMode(MappingMode mode) {
+    if (mode_ == mode) return;
+    mode_ = mode;
+    if (mode_ == MappingMode::Led) log("LED mode: UV01 is per surface; UV02 and up are shared layouts.");
+    else if (mode_ == MappingMode::Mixed) log("Mixed mode: choose Projection or LED for each surface under Surfaces.");
+    else log("Projection mode: every UV channel is shared by the whole mesh.");
+    placeLedLayers();
+}
+
+void App::setSurfaceLed(int surface, bool led) {
+    if (surface < 0 || surface >= (int)mesh_.surfaces.size()) return;
+    mixedLed_.resize(mesh_.surfaces.size(), 0);
+    mixedLed_[surface] = led ? 1 : 0;
+    placeLedLayers();
+}
+
+// After surfaces change between Projection and LED, UV01 layers whose file names
+// a surface move onto it, and files waiting for a surface are tried again.
+void App::placeLedLayers() {
+    for (Layer& layer : layers_) {
+        if (layer.channel != 0 || layer.surface >= 0) continue;
+        const int surface = matchSurface(layer.image.name);
+        if (isLedSurface(surface)) layer.surface = surface;
+    }
+    retryPending();
+}
+
+void App::showTestGrid(int channel) {
+    gridChannel_ = channel;
+    view_.mode = ViewMode::TestGrid;
+}
+
+// The mapping's canvas is set by the largest file on it. UV01 on an LED surface
+// has one canvas per surface; projection surfaces share the rest.
+void App::canvasSize(int channel, int surface, int& width, int& height) const {
+    width = height = 0;
+    const bool own = perSurface(channel, surface);
+    for (const Layer& layer : layers_) {
+        if (layer.channel != channel) continue;
+        if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
+        if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
+            width = layer.image.width;
+            height = layer.image.height;
+        }
+    }
+}
+
+std::vector<std::string> App::layerWarnings(const Layer& layer) const {
+    std::vector<std::string> warnings;
+    if (!channelUsable(layer.channel)) warnings.push_back(channelLabel(layer.channel) + " is ignored");
+    if (needsSurface(layer.channel) && layer.surface < 0) warnings.push_back("UV01 on LED surfaces needs a surface");
+
+    int width = 0, height = 0;
+    canvasSize(layer.channel, layer.surface, width, height);
+    if (layer.image.width < width || layer.image.height < height)
+        warnings.push_back("Lower resolution: " + sizeText(layer.image.width, layer.image.height) + " on a " +
+                           sizeText(width, height) + " mapping");
+    if (width > 0 && height > 0 && layer.image.height > 0) {
+        const float aspect = (float)layer.image.width / (float)layer.image.height;
+        const float canvasAspect = (float)width / (float)height;
+        if (std::fabs(aspect / canvasAspect - 1.0f) > 0.01f) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "Aspect %.2f:1 differs from the mapping's %.2f:1, so it is stretched",
+                          aspect, canvasAspect);
+            warnings.push_back(text);
+        }
+    }
+    return warnings;
 }
 
 void App::openMesh(const std::string& path) {
@@ -77,13 +239,18 @@ void App::openMesh(const std::string& path) {
         return;
     }
 
-    for (ChannelState& channel : channels_) freeImage(channel.image);
     mesh_ = std::move(loaded);
     channels_.assign(mesh_.channels.size(), ChannelState{});
+    mixedLed_.assign(mesh_.surfaces.size(), 0);
     renderer_.uploadMesh(mesh_);
     scale_ = 1.0f;
     camera_.frame(mesh_.boundsMin, mesh_.boundsMax);
-    viewChannel_ = mesh_.channels.empty() ? -1 : 0;
+    gridChannel_ = 0;
+
+    // Layers from a previous mesh keep their media; their channel and surface
+    // may no longer exist, which shows as a warning on the layer.
+    for (Layer& layer : layers_)
+        if (layer.surface >= (int)mesh_.surfaces.size()) layer.surface = -1;
 
     log("Opened " + fileNameOf(path) + ": " + std::to_string(mesh_.surfaces.size()) + " surface(s), " +
         std::to_string(mesh_.vertexCount() / 3) + " triangles, " + std::to_string(mesh_.channels.size()) +
@@ -102,8 +269,7 @@ void App::openMesh(const std::string& path) {
 
 void App::importPath(const std::string& path) {
     std::error_code ec;
-    const std::filesystem::path fsPath = toPath(path);
-    if (std::filesystem::is_directory(fsPath, ec)) {
+    if (std::filesystem::is_directory(toPath(path), ec)) {
         importFolder(path);
     } else if (lowerExtension(path) == ".fbx") {
         openMesh(path);
@@ -138,39 +304,58 @@ void App::importFolder(const std::string& folder) {
 void App::importImage(const std::string& path) {
     const std::string name = fileNameOf(path);
     const int tag = parseUvTag(name);
+    const int channel = tag - 1;
+    int surface = -1;
     std::string reason;
     if (mesh_.empty()) reason = "Open a mesh first";
     else if (tag < 0) reason = "No UV tag in the name";
-    else if (tag < 1 || tag > (int)channels_.size()) reason = "UV" + std::to_string(tag) + " is not on this mesh";
-    else if (channels_[tag - 1].ignored) reason = channelLabel(tag - 1) + " is ignored";
+    else if (channel < 0 || channel >= (int)channels_.size()) reason = "UV" + std::to_string(tag) + " is not on this mesh";
+    else if (channels_[channel].ignored) reason = channelLabel(channel) + " is ignored";
+    else if (channel == 0 && anyLedSurface() && (surface = matchSurface(name)) < 0 && needsSurface(channel))
+        reason = "No surface name found in the file name (UV01 is per surface on LED surfaces)";
 
+    pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                  [&](const PendingFile& p) { return p.path == path; }),
+                   pending_.end());
     if (!reason.empty()) {
-        pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
-                                      [&](const PendingFile& p) { return p.path == path; }),
-                       pending_.end());
-        pending_.push_back({path, reason, 0});
-        log(name + ": " + reason + ". Pick a channel under Unassigned files.");
+        PendingFile file{path, reason, std::clamp(channel, 0, std::max(0, (int)channels_.size() - 1)), -1};
+        pending_.push_back(file);
+        log(name + ": " + reason + ". Pick a mapping under Unassigned files.");
         return;
     }
-    assignImage(path, tag - 1);
+    addLayer(path, channel, surface);
 }
 
-void App::assignImage(const std::string& path, int channel) {
-    Image image;
+bool App::addLayer(const std::string& path, int channel, int surface) {
+    Layer layer;
     std::string error;
-    if (!loadImage(path, maxTextureSize_, image, error)) {
+    if (!loadImage(path, maxTextureSize_, layer.image, error)) {
         log(fileNameOf(path) + ": " + error);
-        return;
+        return false;
     }
-    ChannelState& state = channels_[channel];
-    if (state.image.texture)
-        log(image.name + " replaces " + state.image.name + " on " + channelLabel(channel) +
-            " (several files per channel arrive with layers in milestone 2).");
-    freeImage(state.image);
-    state.image = image;
-    log(image.name + " -> " + channelLabel(channel) + " (" + std::to_string(image.width) + " x " +
-        std::to_string(image.height) + " px)");
-    if (viewChannel_ < 0) viewChannel_ = channel;
+    layer.id = nextLayerId_++;
+    layer.channel = channel;
+    layer.surface = surface;
+    layers_.push_back(layer);
+    selectedLayer_ = layer.id;
+
+    log(layer.image.name + " -> " + placementLabel(channel, surface) + " (" + sizeText(layer.image.width, layer.image.height) + ")");
+    if (layers_.size() == (size_t)kMaxLayers + 1)
+        log("Warning: more than " + std::to_string(kMaxLayers) + " visible layers; only the top " +
+            std::to_string(kMaxLayers) + " are drawn.");
+    return true;
+}
+
+void App::removeLayer(int index) {
+    freeImage(layers_[index].image);
+    layers_.erase(layers_.begin() + index);
+}
+
+void App::moveLayer(int from, int to) {
+    if (from == to || from < 0 || to < 0 || from >= (int)layers_.size() || to >= (int)layers_.size()) return;
+    Layer layer = layers_[from];
+    layers_.erase(layers_.begin() + from);
+    layers_.insert(layers_.begin() + to, layer);
 }
 
 void App::retryPending() {
@@ -187,10 +372,12 @@ void App::frame() {
             ImGui::DockBuilderRemoveNode(dockspace);
             ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
             ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->Size);
-            ImGuiID left = 0, right = 0, bottom = 0;
+            ImGuiID left = 0, right = 0, bottom = 0, leftBottom = 0;
             ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Left, 0.34f, &left, &right);
+            ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5f, &leftBottom, &left);
             ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.18f, &bottom, &right);
             ImGui::DockBuilderDockWindow(kProjectWindow, left);
+            ImGui::DockBuilderDockWindow(kLayersWindow, leftBottom);
             ImGui::DockBuilderDockWindow(kViewportWindow, right);
             ImGui::DockBuilderDockWindow(kLogWindow, bottom);
             ImGui::DockBuilderFinish(dockspace);
@@ -198,6 +385,7 @@ void App::frame() {
     }
 
     drawProjectPanel();
+    drawLayersPanel();
     drawViewport();
     drawLog();
 }
@@ -207,7 +395,6 @@ void App::drawProjectPanel() {
     drawMeshSection();
     ImGui::Spacing();
     drawChannelSection();
-    drawPendingSection();
     ImGui::End();
 }
 
@@ -229,6 +416,18 @@ void App::drawMeshSection() {
         if (ImGui::Button("Import") && pathInput_[0]) importPath(pathInput_);
     }
     ImGui::TextColored(kMutedColor, "Or drop files and folders onto the window.");
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Projection", mode_ == MappingMode::Projection)) setMode(MappingMode::Projection);
+    ImGui::SameLine();
+    if (ImGui::RadioButton("LED", mode_ == MappingMode::Led)) setMode(MappingMode::Led);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("LED: UV01 is per surface, like feed mapping. UV02 and up stay shared layouts.");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Mixed", mode_ == MappingMode::Mixed)) setMode(MappingMode::Mixed);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mixed: choose Projection or LED for each surface.");
 
     if (mesh_.empty()) return;
 
@@ -256,11 +455,52 @@ void App::drawMeshSection() {
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset")) scale_ = 1.0f;
 
-    if (mesh_.surfaces.size() > 1 && ImGui::TreeNode("Surfaces")) {
-        for (const Surface& surface : mesh_.surfaces)
-            ImGui::BulletText("%s (%u triangles)", surface.name.c_str(), surface.vertexCount / 3);
-        ImGui::TreePop();
+    drawSurfaceSection();
+}
+
+// Lists the surfaces with their type and, for LED surfaces, the size of their own UV01 canvas.
+void App::drawSurfaceSection() {
+    const bool open = ImGui::TreeNodeEx("Surfaces", mode_ != MappingMode::Projection ? ImGuiTreeNodeFlags_DefaultOpen : 0,
+                                        "Surfaces (%d)", (int)mesh_.surfaces.size());
+    if (!open) return;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit;
+    if (ImGui::BeginTable("surfaces", 3, flags)) {
+        ImGui::TableSetupColumn("Surface", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Type");
+        ImGui::TableSetupColumn("UV01 mapping");
+        ImGui::TableHeadersRow();
+        for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
+            const Surface& surface = mesh_.surfaces[s];
+            ImGui::PushID(s);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(surface.name.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%u triangles", surface.vertexCount / 3);
+
+            ImGui::TableNextColumn();
+            const bool led = isLedSurface(s);
+            if (mode_ == MappingMode::Mixed) {
+                if (ImGui::RadioButton("Proj.", !led)) setSurfaceLed(s, false);
+                ImGui::SameLine();
+                if (ImGui::RadioButton("LED", led)) setSurfaceLed(s, true);
+            } else {
+                ImGui::TextUnformatted(led ? "LED" : "Projection");
+            }
+
+            ImGui::TableNextColumn();
+            if (led) {
+                int width = 0, height = 0;
+                canvasSize(0, s, width, height);
+                if (width > 0) ImGui::Text("%s", sizeText(width, height).c_str());
+                else ImGui::TextColored(kMutedColor, "No media");
+            } else {
+                ImGui::TextColored(kMutedColor, "Shared");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
     }
+    ImGui::TreePop();
 }
 
 void App::drawChannelSection() {
@@ -279,8 +519,6 @@ void App::drawChannelSection() {
         if (ImGui::Button("Ignore")) {
             state.duplicateDecided = true;
             state.ignored = true;
-            freeImage(state.image);
-            if (viewChannel_ == (int)c) viewChannel_ = info.duplicateOf;
         }
         ImGui::PopID();
     }
@@ -290,7 +528,7 @@ void App::drawChannelSection() {
     ImGui::TableSetupColumn("UV");
     ImGui::TableSetupColumn("Name in file");
     ImGui::TableSetupColumn("In 0-1");
-    ImGui::TableSetupColumn("Content", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Mapping", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableSetupColumn("Clamp");
     ImGui::TableHeadersRow();
 
@@ -301,9 +539,8 @@ void App::drawChannelSection() {
         ImGui::TableNextRow();
 
         ImGui::TableNextColumn();
-        const bool selected = viewChannel_ == (int)c;
-        if (state.ignored) ImGui::TextColored(kMutedColor, "%s", channelLabel((int)c).c_str());
-        else if (ImGui::Selectable(channelLabel((int)c).c_str(), selected)) viewChannel_ = (int)c;
+        ImGui::TextColored(state.ignored ? kMutedColor : ImGui::GetStyleColorVec4(ImGuiCol_Text), "%s",
+                           channelLabel((int)c).c_str());
 
         ImGui::TableNextColumn();
         ImGui::TextColored(state.ignored ? kMutedColor : ImGui::GetStyleColorVec4(ImGuiCol_Text), "%s",
@@ -318,25 +555,24 @@ void App::drawChannelSection() {
                               info.maxU, info.minV, info.maxV);
 
         ImGui::TableNextColumn();
+        int layerCount = 0;
+        for (const Layer& layer : layers_) layerCount += layer.channel == (int)c;
         if (state.ignored) {
             ImGui::TextColored(kMutedColor, "Ignored");
             ImGui::SameLine();
             if (ImGui::SmallButton("Restore")) state.ignored = false;
+        } else if (c == 0 && anyLedSurface()) {
+            int width = 0, height = 0;
+            if (anyProjectionSurface()) canvasSize(0, -1, width, height);
+            if (width > 0) ImGui::Text("Shared %s", sizeText(width, height).c_str());
+            ImGui::Text("Per LED surface, see Surfaces");
+            ImGui::TextColored(kMutedColor, "%d layer(s)", layerCount);
         } else {
-            if (state.image.texture) {
-                ImGui::Text("%s", state.image.name.c_str());
-                ImGui::TextColored(kMutedColor, "%d x %d px", state.image.width, state.image.height);
-            } else {
-                ImGui::TextColored(kMutedColor, "No image (test grid)");
-            }
-            if (ImGui::SmallButton("Load...")) {
-                const std::string path = openFileDialog(FileKind::Image);
-                if (!path.empty()) assignImage(path, (int)c);
-            }
-            if (state.image.texture) {
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Clear")) freeImage(state.image);
-            }
+            int width = 0, height = 0;
+            canvasSize((int)c, -1, width, height);
+            if (width > 0) ImGui::Text("%s", sizeText(width, height).c_str());
+            else ImGui::TextColored(kMutedColor, "No media");
+            ImGui::TextColored(kMutedColor, "%d layer(s)", layerCount);
         }
 
         ImGui::TableNextColumn();
@@ -346,6 +582,164 @@ void App::drawChannelSection() {
         ImGui::PopID();
     }
     ImGui::EndTable();
+}
+
+bool App::channelCombo(const char* id, int& channel) {
+    bool changed = false;
+    const std::string preview = channel >= 0 && channel < (int)channels_.size() ? channelLabel(channel) : "-";
+    if (ImGui::BeginCombo(id, preview.c_str())) {
+        for (int c = 0; c < (int)channels_.size(); ++c) {
+            if (!channelUsable(c)) continue;
+            const std::string label = channelLabel(c) + "  " + mesh_.channels[c].name;
+            if (ImGui::Selectable(label.c_str(), channel == c)) {
+                channel = c;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+bool App::surfaceCombo(const char* id, int& surface) {
+    bool changed = false;
+    if (ImGui::BeginCombo(id, surfaceLabel(surface).c_str())) {
+        if (ImGui::Selectable("All surfaces", surface < 0)) {
+            surface = -1;
+            changed = true;
+        }
+        for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
+            if (ImGui::Selectable(mesh_.surfaces[s].name.c_str(), surface == s)) {
+                surface = s;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+void App::drawLayersPanel() {
+    ImGui::Begin(kLayersWindow);
+    const bool canAdd = !mesh_.empty();
+    ImGui::BeginDisabled(!canAdd);
+    if (ImGui::Button("Add image...")) {
+        const std::string path = openFileDialog(FileKind::Image);
+        if (!path.empty()) importImage(path);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Import folder...##layers")) {
+        const std::string folder = pickFolderDialog();
+        if (!folder.empty()) importFolder(folder);
+    }
+    ImGui::EndDisabled();
+
+    int visibleCount = 0;
+    for (const Layer& layer : layers_) visibleCount += layer.visible;
+    if (visibleCount > kMaxLayers)
+        ImGui::TextColored(kWarningColor, "%d visible layers: only the top %d are drawn.", visibleCount, kMaxLayers);
+
+    drawLayerList();
+    const int index = selectedIndex();
+    if (index >= 0) drawLayerEditor(layers_[index], index);
+    drawPendingSection();
+    ImGui::End();
+}
+
+void App::drawLayerList() {
+    ImGui::SeparatorText("Stack (top first, drag to reorder)");
+    if (layers_.empty()) {
+        ImGui::TextColored(kMutedColor, "No layers yet. Add images or import a folder.");
+        return;
+    }
+
+    int moveFrom = -1, moveTo = -1;
+    for (int i = (int)layers_.size() - 1; i >= 0; --i) {
+        Layer& layer = layers_[i];
+        ImGui::PushID(layer.id);
+        ImGui::Checkbox("##visible", &layer.visible);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show or hide this layer");
+        ImGui::SameLine();
+
+        std::string label = layer.image.name + "\n" + placementLabel(layer.channel, layer.surface);
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), " · %s · %.0f%%", blendModeName(layer.blend), layer.opacity * 100.0f);
+        label += detail;
+        const bool warn = !layerWarnings(layer).empty();
+        if (warn) label += "  (!)";
+
+        if (!layer.visible) ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
+        if (ImGui::Selectable(label.c_str(), selectedLayer_ == layer.id, 0, ImVec2(0, ImGui::GetTextLineHeight() * 2)))
+            selectedLayer_ = layer.id;
+        if (!layer.visible) ImGui::PopStyleColor();
+
+        if (ImGui::BeginDragDropSource()) {
+            ImGui::SetDragDropPayload(kLayerPayload, &i, sizeof(int));
+            ImGui::Text("Move %s", layer.image.name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kLayerPayload)) {
+                moveFrom = *(const int*)payload->Data;
+                moveTo = i;
+            }
+            ImGui::EndDragDropTarget();
+        }
+        ImGui::PopID();
+    }
+    if (moveFrom >= 0) moveLayer(moveFrom, moveTo);
+}
+
+void App::drawLayerEditor(Layer& layer, int index) {
+    ImGui::SeparatorText("Selected layer");
+    ImGui::Text("%s", layer.image.name.c_str());
+    ImGui::TextColored(kMutedColor, "%s", sizeText(layer.image.width, layer.image.height).c_str());
+
+    const float fieldWidth = std::max(120.0f, ImGui::GetContentRegionAvail().x - 110.0f);
+    ImGui::SetNextItemWidth(fieldWidth);
+    channelCombo("Mapping", layer.channel);
+    ImGui::SetNextItemWidth(fieldWidth);
+    surfaceCombo("Surface", layer.surface);
+
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::BeginCombo("Blend", blendModeName(layer.blend))) {
+        for (int b = 0; b < (int)BlendMode::Count; ++b) {
+            if (ImGui::Selectable(blendModeName((BlendMode)b), (int)layer.blend == b)) layer.blend = (BlendMode)b;
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Mask: this layer's brightness cuts out everything below it.");
+
+    ImGui::SetNextItemWidth(fieldWidth);
+    float percent = layer.opacity * 100.0f;
+    if (ImGui::SliderFloat("Opacity", &percent, 0.0f, 100.0f, "%.0f%%")) layer.opacity = percent / 100.0f;
+
+    for (const std::string& warning : layerWarnings(layer)) ImGui::TextColored(kWarningColor, "%s", warning.c_str());
+
+    if (ImGui::Button("Up") && index + 1 < (int)layers_.size()) moveLayer(index, index + 1);
+    ImGui::SameLine();
+    if (ImGui::Button("Down") && index > 0) moveLayer(index, index - 1);
+    ImGui::SameLine();
+    if (ImGui::Button("Replace image...")) {
+        const std::string path = openFileDialog(FileKind::Image);
+        Image image;
+        std::string error;
+        if (!path.empty()) {
+            if (loadImage(path, maxTextureSize_, image, error)) {
+                Layer& target = layers_[selectedIndex()];
+                freeImage(target.image);
+                target.image = image;
+            } else {
+                log(fileNameOf(path) + ": " + error);
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) {
+        removeLayer(selectedIndex());
+        selectedLayer_ = -1;
+    }
 }
 
 void App::drawPendingSection() {
@@ -358,20 +752,15 @@ void App::drawPendingSection() {
         ImGui::TextColored(kWarningColor, "%s", file.reason.c_str());
         bool remove = false;
         if (!channels_.empty()) {
-            ImGui::SetNextItemWidth(110);
-            const std::string preview = channelLabel(file.choice);
-            if (ImGui::BeginCombo("##channel", preview.c_str())) {
-                for (int c = 0; c < (int)channels_.size(); ++c) {
-                    if (!channelUsable(c)) continue;
-                    if (ImGui::Selectable(channelLabel(c).c_str(), file.choice == c)) file.choice = c;
-                }
-                ImGui::EndCombo();
-            }
+            ImGui::SetNextItemWidth(90);
+            channelCombo("##channel", file.channel);
             ImGui::SameLine();
-            if (ImGui::Button("Assign") && channelUsable(file.choice)) {
-                assignImage(file.path, file.choice);
-                remove = true;
-            }
+            ImGui::SetNextItemWidth(130);
+            surfaceCombo("##surface", file.surface);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!channelUsable(file.channel) || (needsSurface(file.channel) && file.surface < 0));
+            if (ImGui::Button("Assign")) remove = addLayer(file.path, file.channel, file.surface);
+            ImGui::EndDisabled();
             ImGui::SameLine();
         }
         if (ImGui::Button("Remove")) remove = true;
@@ -392,16 +781,19 @@ void App::drawViewport() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Show");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    const std::string preview = channelUsable(viewChannel_)
-                                    ? channelLabel(viewChannel_) + "  " + mesh_.channels[viewChannel_].name
-                                    : std::string("Mesh only");
+    ImGui::SetNextItemWidth(230);
+    std::string preview = "Layers";
+    if (view_.mode == ViewMode::MeshOnly) preview = "Mesh only";
+    if (view_.mode == ViewMode::TestGrid && channelUsable(gridChannel_))
+        preview = "Test grid on " + channelLabel(gridChannel_);
     if (ImGui::BeginCombo("##show", preview.c_str())) {
-        if (ImGui::Selectable("Mesh only", viewChannel_ < 0)) viewChannel_ = -1;
+        if (ImGui::Selectable("Layers", view_.mode == ViewMode::Layers)) view_.mode = ViewMode::Layers;
+        if (ImGui::Selectable("Mesh only", view_.mode == ViewMode::MeshOnly)) view_.mode = ViewMode::MeshOnly;
         for (int c = 0; c < (int)channels_.size(); ++c) {
             if (!channelUsable(c)) continue;
-            const std::string label = channelLabel(c) + "  " + mesh_.channels[c].name;
-            if (ImGui::Selectable(label.c_str(), viewChannel_ == c)) viewChannel_ = c;
+            const std::string label = "Test grid on " + channelLabel(c) + "  " + mesh_.channels[c].name;
+            if (ImGui::Selectable(label.c_str(), view_.mode == ViewMode::TestGrid && gridChannel_ == c))
+                showTestGrid(c);
         }
         ImGui::EndCombo();
     }
@@ -438,10 +830,29 @@ void App::drawViewport() {
         camera_.frame(scaledMin, scaledMax);
     }
 
+    // The renderer takes visible layers bottom to top; past the limit the top ones win.
+    view_.layers.clear();
+    for (const Layer& layer : layers_) {
+        if (!layer.visible || !layer.image.texture || !channelUsable(layer.channel)) continue;
+        RenderLayer render;
+        render.texture = layer.image.texture;
+        render.channel = layer.channel;
+        render.surface = layer.surface >= 0 ? layer.surface
+                         : layer.channel == 0 ? kProjectionSurfaces
+                                              : kAllSurfaces;
+        render.blend = layer.blend;
+        render.opacity = layer.opacity;
+        render.clamp = channels_[layer.channel].clamp;
+        view_.layers.push_back(render);
+    }
+    if ((int)view_.layers.size() > kMaxLayers)
+        view_.layers.erase(view_.layers.begin(), view_.layers.end() - kMaxLayers);
+    if (view_.mode == ViewMode::TestGrid && !channelUsable(gridChannel_)) view_.mode = ViewMode::Layers;
+    view_.gridChannel = gridChannel_;
+    view_.gridClamp = channelUsable(gridChannel_) ? channels_[gridChannel_].clamp : true;
     view_.scale = scale_;
-    view_.channel = channelUsable(viewChannel_) ? viewChannel_ : -1;
-    view_.texture = view_.channel >= 0 ? channels_[view_.channel].image.texture : 0;
-    view_.clamp = view_.channel >= 0 ? channels_[view_.channel].clamp : true;
+    view_.ledSurfaces.assign(mesh_.surfaces.size(), 0);
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) view_.ledSurfaces[s] = isLedSurface(s);
     renderer_.render(width, height, camera_, view_);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();

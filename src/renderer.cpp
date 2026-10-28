@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include <glad/gl.h>
@@ -13,28 +14,45 @@ constexpr float kPi = 3.14159265358979f;
 
 const char* kMeshVertexShader = R"(#version 330 core
 layout(location = 0) in vec3 aPosition;
-layout(location = 1) in vec2 aUv[8];
+layout(location = 1) in float aSurface;
+layout(location = 2) in vec2 aUv[8];
 uniform mat4 uViewProjection;
 uniform float uScale;
 out vec3 vWorld;
+flat out int vSurface;
 out vec2 vUv[8];
 void main() {
     vec3 world = aPosition * uScale;
     vWorld = world;
+    vSurface = int(aSurface + 0.5);
     for (int i = 0; i < 8; ++i) vUv[i] = aUv[i];
     gl_Position = uViewProjection * vec4(world, 1.0);
 }
 )";
 
-const char* kMeshFragmentShader = R"(#version 330 core
+// Shared part of the mesh fragment shader. The per-layer code is appended by
+// meshFragmentShader(), because GLSL 3.30 only indexes sampler arrays with constants.
+const char* kMeshFragmentHeader = R"(#version 330 core
+#define MAX_LAYERS 15
 in vec3 vWorld;
+flat in int vSurface;
 in vec2 vUv[8];
-uniform int uChannel;
-uniform sampler2D uTexture;
-uniform bool uHasTexture;
-uniform bool uClamp;
+uniform int uMode;  // 0 layers, 1 mesh only, 2 UV test grid
+uniform int uGridChannel;
+uniform bool uGridClamp;
 uniform bool uWire;
+uniform int uLayerCount;
+uniform int uLayerChannel[MAX_LAYERS];
+uniform int uLayerSurface[MAX_LAYERS];
+uniform int uLayerBlend[MAX_LAYERS];
+uniform float uLayerOpacity[MAX_LAYERS];
+uniform bool uLayerClamp[MAX_LAYERS];
+uniform sampler2D uTexture[MAX_LAYERS];
+uniform sampler2D uLedSurfaces;  // one texel per surface, red = 1 for LED surfaces
 out vec4 fragColor;
+
+vec3 color = vec3(0.0);   // accumulated layer colour
+float coverage = 0.0;     // how much of the base mesh the layers hide
 
 vec2 channelUv(int c) {
     if (c == 0) return vUv[0];
@@ -47,14 +65,52 @@ vec2 channelUv(int c) {
     return vUv[7];
 }
 
+bool insideUnitSquare(vec2 uv) {
+    return all(greaterThanEqual(uv, vec2(-1e-4))) && all(lessThanEqual(uv, vec2(1.0 + 1e-4)));
+}
+
 // Shown on a channel with no image: a coloured checker so the layout is readable.
 vec3 uvTestGrid(vec2 uv) {
     vec2 cells = uv * 8.0;
     float checker = mod(floor(cells.x) + floor(cells.y), 2.0);
-    vec3 color = vec3(0.25 + 0.6 * uv.x, 0.25 + 0.6 * uv.y, 0.55) * (0.75 + 0.25 * checker);
+    vec3 grid = vec3(0.25 + 0.6 * uv.x, 0.25 + 0.6 * uv.y, 0.55) * (0.75 + 0.25 * checker);
     vec2 distance = abs(fract(cells - 0.5) - 0.5) / max(fwidth(cells), vec2(1e-5));
     float line = 1.0 - min(min(distance.x, distance.y), 1.0);
-    return mix(color, vec3(0.95), line * 0.5);
+    return mix(grid, vec3(0.95), line * 0.5);
+}
+
+// Samples with gradients from the unwrapped UV so repeating (clamp off) has no seams.
+// Textures are stored premultiplied; this returns straight colour and alpha.
+vec4 sampleLayer(sampler2D tex, vec2 uv, bool clampUv) {
+    vec2 at = clampUv ? uv : fract(uv);
+    vec4 texel = textureGrad(tex, at, dFdx(uv), dFdy(uv));
+    return vec4(texel.a > 0.0 ? texel.rgb / texel.a : vec3(0.0), texel.a);
+}
+
+void applyLayer(int i, vec2 uv, vec4 texel) {
+    float visible = uLayerClamp[i] && !insideUnitSquare(uv) ? 0.0 : 1.0;
+    if (uLayerSurface[i] >= 0 && uLayerSurface[i] != vSurface) visible = 0.0;
+    if (uLayerSurface[i] == -2 && texelFetch(uLedSurfaces, ivec2(vSurface, 0), 0).r > 0.5) visible = 0.0;
+    float amount = visible * uLayerOpacity[i];
+    float weight = amount * texel.a;
+    int blend = uLayerBlend[i];
+    if (blend == 0) {          // Normal
+        color = mix(color, texel.rgb, weight);
+        coverage += weight * (1.0 - coverage);
+    } else if (blend == 1) {   // Add
+        color += texel.rgb * weight;
+        coverage += weight * (1.0 - coverage);
+    } else if (blend == 2) {   // Multiply
+        color = mix(color, color * texel.rgb, weight);
+    } else if (blend == 3) {   // Screen
+        color = mix(color, 1.0 - (1.0 - color) * (1.0 - texel.rgb), weight);
+        coverage += weight * (1.0 - coverage);
+    } else {                   // Mask: this layer's brightness cuts out everything below
+        float luminance = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722)) * texel.a;
+        float keep = mix(1.0, luminance, amount);
+        color *= keep;
+        coverage *= keep;
+    }
 }
 
 void main() {
@@ -65,25 +121,34 @@ void main() {
     vec3 normal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
     float shade = 0.55 + 0.45 * abs(dot(normal, normalize(vec3(0.3, 0.8, 0.5))));
     vec3 base = vec3(0.16, 0.17, 0.19) * shade;
-    if (uChannel < 0) {
+    if (uMode == 1) {
         fragColor = vec4(base * 1.6, 1.0);
         return;
     }
-    vec2 uv = channelUv(uChannel);
-    bool inside = all(greaterThanEqual(uv, vec2(-1e-4))) && all(lessThanEqual(uv, vec2(1.0 + 1e-4)));
-    if (uClamp && !inside) {
-        fragColor = vec4(base, 1.0);
+    if (uMode == 2) {
+        vec2 uv = channelUv(uGridChannel);
+        bool hidden = uGridClamp && !insideUnitSquare(uv);
+        fragColor = vec4(hidden ? base : uvTestGrid(uGridClamp ? uv : fract(uv)), 1.0);
         return;
     }
-    vec2 sampleUv = uClamp ? uv : fract(uv);
-    if (uHasTexture) {
-        vec4 texel = texture(uTexture, sampleUv);
-        fragColor = vec4(mix(base, texel.rgb, texel.a), 1.0);
-    } else {
-        fragColor = vec4(uvTestGrid(sampleUv), 1.0);
-    }
+    // @LAYER_CODE
+    fragColor = vec4(color + base * (1.0 - coverage), 1.0);
 }
 )";
+
+std::string meshFragmentShader() {
+    std::string layers;
+    for (int i = 0; i < kMaxLayers; ++i) {
+        const std::string n = std::to_string(i);
+        layers += "if (uLayerCount > " + n + ") { vec2 uv = channelUv(uLayerChannel[" + n +
+                  "]); applyLayer(" + n + ", uv, sampleLayer(uTexture[" + n + "], uv, uLayerClamp[" + n +
+                  "])); }\n    ";
+    }
+    std::string source = kMeshFragmentHeader;
+    const std::string marker = "// @LAYER_CODE";
+    source.replace(source.find(marker), marker.size(), layers);
+    return source;
+}
 
 const char* kLineVertexShader = R"(#version 330 core
 layout(location = 0) in vec3 aPosition;
@@ -159,6 +224,17 @@ void cross(const float a[3], const float b[3], float out[3]) {
 
 }  // namespace
 
+const char* blendModeName(BlendMode mode) {
+    switch (mode) {
+        case BlendMode::Normal: return "Normal";
+        case BlendMode::Add: return "Add";
+        case BlendMode::Multiply: return "Multiply";
+        case BlendMode::Screen: return "Screen";
+        case BlendMode::Mask: return "Mask";
+        default: return "?";
+    }
+}
+
 void OrbitCamera::frame(const float boundsMin[3], const float boundsMax[3]) {
     float radius = 0;
     for (int axis = 0; axis < 3; ++axis) {
@@ -230,7 +306,7 @@ void OrbitCamera::viewProjection(float aspect, float out[16]) const {
 }
 
 bool Renderer::init() {
-    meshProgram_ = linkProgram(kMeshVertexShader, kMeshFragmentShader);
+    meshProgram_ = linkProgram(kMeshVertexShader, meshFragmentShader().c_str());
     lineProgram_ = linkProgram(kLineVertexShader, kLineFragmentShader);
     if (!meshProgram_ || !lineProgram_) return false;
 
@@ -257,9 +333,11 @@ bool Renderer::init() {
     const GLsizei stride = kVertexFloats * sizeof(float);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, stride, (void*)(kSurfaceOffset * sizeof(float)));
     for (int c = 0; c < kMaxUvChannels; ++c) {
-        glEnableVertexAttribArray(1 + c);
-        glVertexAttribPointer(1 + c, 2, GL_FLOAT, GL_FALSE, stride, (void*)((3 + 2 * c) * sizeof(float)));
+        glEnableVertexAttribArray(2 + c);
+        glVertexAttribPointer(2 + c, 2, GL_FLOAT, GL_FALSE, stride, (void*)((kUvOffset + 2 * c) * sizeof(float)));
     }
     glBindVertexArray(0);
     return true;
@@ -274,6 +352,7 @@ void Renderer::shutdown() {
     glDeleteBuffers(1, &gridVbo_);
     glDeleteFramebuffers(1, &framebuffer_);
     glDeleteTextures(1, &colorTexture_);
+    glDeleteTextures(1, &ledTexture_);
     glDeleteRenderbuffers(1, &depthBuffer_);
 }
 
@@ -305,6 +384,21 @@ void Renderer::resizeTarget(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void Renderer::uploadLedSurfaces(const std::vector<unsigned char>& flags) {
+    if (ledValid_ && flags == ledUploaded_) return;
+    if (!ledTexture_) glGenTextures(1, &ledTexture_);
+    std::vector<unsigned char> texels(std::max<size_t>(flags.size(), 1), 0);
+    for (size_t i = 0; i < flags.size(); ++i) texels[i] = flags[i] ? 255 : 0;
+    glBindTexture(GL_TEXTURE_2D, ledTexture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (int)texels.size(), 1, 0, GL_RED, GL_UNSIGNED_BYTE, texels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    ledUploaded_ = flags;
+    ledValid_ = true;
+}
+
 void Renderer::render(int width, int height, const OrbitCamera& camera, const ViewSettings& view) {
     width = std::max(width, 1);
     height = std::max(height, 1);
@@ -332,13 +426,39 @@ void Renderer::render(int width, int height, const OrbitCamera& camera, const Vi
         glUseProgram(meshProgram_);
         glUniformMatrix4fv(glGetUniformLocation(meshProgram_, "uViewProjection"), 1, GL_FALSE, viewProjection);
         glUniform1f(glGetUniformLocation(meshProgram_, "uScale"), view.scale);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uChannel"), view.channel);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uHasTexture"), view.texture != 0);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uClamp"), view.clamp);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uTexture"), 0);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uMode"), (int)view.mode);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uGridChannel"), view.gridChannel);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uGridClamp"), view.gridClamp);
         glUniform1i(glGetUniformLocation(meshProgram_, "uWire"), 0);
+
+        const int layerCount = std::min((int)view.layers.size(), kMaxLayers);
+        int channel[kMaxLayers] = {}, surface[kMaxLayers] = {}, blend[kMaxLayers] = {}, clampUv[kMaxLayers] = {};
+        int units[kMaxLayers];
+        float opacity[kMaxLayers] = {};
+        for (int i = 0; i < kMaxLayers; ++i) {
+            units[i] = i;
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, i < layerCount ? view.layers[i].texture : 0);
+            if (i >= layerCount) continue;
+            const RenderLayer& layer = view.layers[i];
+            channel[i] = layer.channel;
+            surface[i] = layer.surface;
+            blend[i] = (int)layer.blend;
+            clampUv[i] = layer.clamp;
+            opacity[i] = layer.opacity;
+        }
+        uploadLedSurfaces(view.ledSurfaces);
+        glActiveTexture(GL_TEXTURE0 + kMaxLayers);
+        glBindTexture(GL_TEXTURE_2D, ledTexture_);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uLedSurfaces"), kMaxLayers);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, view.texture);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uLayerCount"), layerCount);
+        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerChannel"), kMaxLayers, channel);
+        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerSurface"), kMaxLayers, surface);
+        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerBlend"), kMaxLayers, blend);
+        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerClamp"), kMaxLayers, clampUv);
+        glUniform1fv(glGetUniformLocation(meshProgram_, "uLayerOpacity"), kMaxLayers, opacity);
+        glUniform1iv(glGetUniformLocation(meshProgram_, "uTexture"), kMaxLayers, units);
         glBindVertexArray(meshVao_);
 
         glEnable(GL_POLYGON_OFFSET_FILL);

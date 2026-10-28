@@ -3,6 +3,10 @@
 #include <string>
 #include <vector>
 
+#include <imgui.h>
+
+#include "distortion.h"
+#include "generators.h"
 #include "media.h"
 #include "mesh.h"
 #include "renderer.h"
@@ -22,7 +26,10 @@ struct ChannelState {
 // One entry of the global layer stack: a piece of media placed on a mapping.
 struct Layer {
     int id = 0;
-    Image image;
+    Image image;  // for a generator: its name, size and the texture it draws into
+    bool generated = false;
+    GeneratorSettings generator;
+    GeneratorTarget target;
     int channel = 0;
     int surface = -1;  // -1 = every surface (on UV01: every projection surface)
     BlendMode blend = BlendMode::Normal;
@@ -59,6 +66,8 @@ public:
     void showUvView(int channel, int surface);
     // Renders the UV view's output at full size and saves it; returns false on failure.
     bool exportOutputPng(const std::string& path);
+    void addGenerator(GeneratorType type, int channel, int surface);
+    void showDistortion(bool stretch);
     void setTimelineLength(double seconds);
     void setTime(double seconds);
 
@@ -92,6 +101,11 @@ private:
     void drawLayersPanel();
     void drawLayerList();
     void drawLayerEditor(Layer& layer, int index);
+    void drawGeneratorEditor(Layer& layer);
+    void updateGenerators();
+    std::string generatorLabel(const Layer& layer) const;
+    DistortionFilter distortionFilter() const;
+    void drawDistortionLegend(ImDrawList* drawList, ImVec2 corner, bool stretch) const;
     void drawPendingSection();
     bool channelCombo(const char* id, int& channel);
     bool surfaceCombo(const char* id, int& surface);
@@ -120,6 +134,7 @@ private:
     std::vector<PendingFile> pending_;
     std::vector<std::string> log_;
     Renderer renderer_;
+    Generators generators_;
     OrbitCamera camera_;
     ViewSettings view_;
     float scale_ = 1.0f;
@@ -143,7 +158,9 @@ private:
     bool showUvView_ = true;
     int uvChannel_ = 0;
     int uvSurface_ = kAllSurfaces;
-    bool uvMappingOnly_ = false;  // only the layers on this mapping, not the full output
+    enum class UvShow { Output, Mapping, Density, Stretch };
+    UvShow uvShow_ = UvShow::Output;
+    bool distortionStretch_ = false;  // the 3D view's distortion shows stretch rather than density
     bool uvWireframe_ = false;
     float uvZoom_ = 0.0f;         // screen pixels per output pixel; 0 = fit to the window
     float uvPan_[2] = {0, 0};     // offset of the image centre from the view centre, in screen pixels

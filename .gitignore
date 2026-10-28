@@ -1,0 +1,5 @@
+build/
+out/
+.vs/
+imgui_layout.ini
+*.user

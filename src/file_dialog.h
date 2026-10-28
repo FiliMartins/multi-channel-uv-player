@@ -10,3 +10,5 @@ enum class FileKind { Fbx, Image };
 bool nativeDialogsAvailable();
 std::string openFileDialog(FileKind kind);
 std::string pickFolderDialog();
+// Asks where to save a PNG, starting from `suggestedName`.
+std::string savePngDialog(const std::string& suggestedName);

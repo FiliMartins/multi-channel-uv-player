@@ -9,6 +9,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <stb_image_write.h>
 
 #include "file_dialog.h"
 #include "paths.h"
@@ -18,6 +19,7 @@ namespace {
 const char* kProjectWindow = "Project";
 const char* kLayersWindow = "Layers";
 const char* kViewportWindow = "3D View";
+const char* kUvWindow = "UV View";
 const char* kLogWindow = "Log";
 const char* kLayerPayload = "LAYER_INDEX";
 
@@ -372,13 +374,15 @@ void App::frame() {
             ImGui::DockBuilderRemoveNode(dockspace);
             ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
             ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->Size);
-            ImGuiID left = 0, right = 0, bottom = 0, leftBottom = 0;
-            ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Left, 0.34f, &left, &right);
+            ImGuiID left = 0, right = 0, bottom = 0, leftBottom = 0, uv = 0;
+            ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Left, 0.30f, &left, &right);
             ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5f, &leftBottom, &left);
             ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.18f, &bottom, &right);
+            ImGui::DockBuilderSplitNode(right, ImGuiDir_Right, 0.45f, &uv, &right);
             ImGui::DockBuilderDockWindow(kProjectWindow, left);
             ImGui::DockBuilderDockWindow(kLayersWindow, leftBottom);
             ImGui::DockBuilderDockWindow(kViewportWindow, right);
+            ImGui::DockBuilderDockWindow(kUvWindow, uv);
             ImGui::DockBuilderDockWindow(kLogWindow, bottom);
             ImGui::DockBuilderFinish(dockspace);
         }
@@ -387,6 +391,7 @@ void App::frame() {
     drawProjectPanel();
     drawLayersPanel();
     drawViewport();
+    drawUvView();
     drawLog();
 }
 
@@ -781,7 +786,7 @@ void App::drawViewport() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Show");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(230);
+    ImGui::SetNextItemWidth(190);
     std::string preview = "Layers";
     if (view_.mode == ViewMode::MeshOnly) preview = "Mesh only";
     if (view_.mode == ViewMode::TestGrid && channelUsable(gridChannel_))
@@ -803,6 +808,8 @@ void App::drawViewport() {
     ImGui::Checkbox("Floor grid", &view_.grid);
     ImGui::SameLine();
     bool frameRequested = ImGui::Button("Frame (F)");
+    ImGui::SameLine();
+    ImGui::Checkbox("UV view", &showUvView_);
     ImGui::Dummy(ImVec2(0, 2));
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -830,29 +837,12 @@ void App::drawViewport() {
         camera_.frame(scaledMin, scaledMax);
     }
 
-    // The renderer takes visible layers bottom to top; past the limit the top ones win.
-    view_.layers.clear();
-    for (const Layer& layer : layers_) {
-        if (!layer.visible || !layer.image.texture || !channelUsable(layer.channel)) continue;
-        RenderLayer render;
-        render.texture = layer.image.texture;
-        render.channel = layer.channel;
-        render.surface = layer.surface >= 0 ? layer.surface
-                         : layer.channel == 0 ? kProjectionSurfaces
-                                              : kAllSurfaces;
-        render.blend = layer.blend;
-        render.opacity = layer.opacity;
-        render.clamp = channels_[layer.channel].clamp;
-        view_.layers.push_back(render);
-    }
-    if ((int)view_.layers.size() > kMaxLayers)
-        view_.layers.erase(view_.layers.begin(), view_.layers.end() - kMaxLayers);
+    view_.layers = renderLayers(-1);
     if (view_.mode == ViewMode::TestGrid && !channelUsable(gridChannel_)) view_.mode = ViewMode::Layers;
     view_.gridChannel = gridChannel_;
     view_.gridClamp = channelUsable(gridChannel_) ? channels_[gridChannel_].clamp : true;
     view_.scale = scale_;
-    view_.ledSurfaces.assign(mesh_.surfaces.size(), 0);
-    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) view_.ledSurfaces[s] = isLedSurface(s);
+    view_.ledSurfaces = ledFlags();
     renderer_.render(width, height, camera_, view_);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -866,6 +856,264 @@ void App::drawViewport() {
     }
     drawList->AddText(ImVec2(origin.x + 10, origin.y + height - 24), IM_COL32(120, 125, 135, 255),
                       "Left drag: orbit   Right or middle drag: pan   Wheel: zoom   F: frame");
+    ImGui::End();
+}
+
+// Visible layers as the renderer takes them, bottom to top; past the limit the top ones win.
+std::vector<RenderLayer> App::renderLayers(int onlyChannel) const {
+    std::vector<RenderLayer> result;
+    for (const Layer& layer : layers_) {
+        if (!layer.visible || !layer.image.texture || !channelUsable(layer.channel)) continue;
+        if (onlyChannel >= 0 && layer.channel != onlyChannel) continue;
+        RenderLayer render;
+        render.texture = layer.image.texture;
+        render.channel = layer.channel;
+        render.surface = layer.surface >= 0 ? layer.surface
+                         : layer.channel == 0 ? kProjectionSurfaces
+                                              : kAllSurfaces;
+        render.blend = layer.blend;
+        render.opacity = layer.opacity;
+        render.clamp = channels_[layer.channel].clamp;
+        result.push_back(render);
+    }
+    if ((int)result.size() > kMaxLayers) result.erase(result.begin(), result.end() - kMaxLayers);
+    return result;
+}
+
+std::vector<unsigned char> App::ledFlags() const {
+    std::vector<unsigned char> flags(mesh_.surfaces.size(), 0);
+    for (int s = 0; s < (int)flags.size(); ++s) flags[s] = isLedSurface(s);
+    return flags;
+}
+
+void App::showUvView(int channel, int surface) {
+    showUvView_ = true;
+    uvChannel_ = channel;
+    uvSurface_ = surface;
+}
+
+// The surface the UV view draws. UV01 on LED surfaces is one surface at a time,
+// since each LED surface fills its own 0-1 square.
+int App::resolvedUvSurface() const {
+    if (uvChannel_ == 0 && anyLedSurface()) {
+        if (isLedSurface(uvSurface_)) return uvSurface_;
+        if (anyProjectionSurface()) return kProjectionSurfaces;
+        for (int s = 0; s < (int)mesh_.surfaces.size(); ++s)
+            if (isLedSurface(s)) return s;
+    }
+    if (uvSurface_ >= 0 && uvSurface_ < (int)mesh_.surfaces.size()) return uvSurface_;
+    return kAllSurfaces;
+}
+
+// The output takes the mapping's size, set by its largest file.
+void App::outputSize(int& width, int& height, std::string& note) const {
+    const int surface = resolvedUvSurface();
+    canvasSize(uvChannel_, surface >= 0 ? surface : -1, width, height);
+    note.clear();
+    if (width <= 0 || height <= 0) {
+        width = height = 1024;
+        note = "No media on this mapping yet; previewing at 1024 x 1024 px.";
+    }
+    if (width > maxTextureSize_ || height > maxTextureSize_) {
+        const float shrink = (float)maxTextureSize_ / (float)std::max(width, height);
+        note = "Mapping is " + sizeText(width, height) + ", over this GPU's limit; previewing smaller.";
+        width = std::max(1, (int)(width * shrink));
+        height = std::max(1, (int)(height * shrink));
+    }
+}
+
+std::string App::outputName() const {
+    std::string name = utf8String(toPath(mesh_.path).stem());
+    if (name.empty()) name = "output";
+    name += "_" + channelLabel(uvChannel_);
+    const int surface = resolvedUvSurface();
+    if (surface >= 0) name += "_" + surfaceLabel(surface);
+    if (uvMappingOnly_) name += "_mapping";
+    for (char& c : name)
+        if (c == ' ' || c == '/' || c == '\\' || c == ':') c = '_';
+    return name + ".png";
+}
+
+void App::renderOutput(bool wireframe, int& width, int& height, std::string& note) {
+    UvViewSettings settings;
+    settings.channel = uvChannel_;
+    settings.surface = resolvedUvSurface();
+    outputSize(settings.width, settings.height, note);
+    settings.layers = renderLayers(uvMappingOnly_ ? uvChannel_ : -1);
+    settings.ledSurfaces = ledFlags();
+    settings.wireframe = wireframe;
+    renderer_.renderUv(settings);
+    width = settings.width;
+    height = settings.height;
+}
+
+bool App::exportOutputPng(const std::string& path) {
+    if (mesh_.empty() || !channelUsable(uvChannel_)) {
+        log("Nothing to export: open a mesh and pick a UV channel in the UV view.");
+        return false;
+    }
+    // Rendered without the wireframe overlay, so the PNG is the output itself.
+    int width = 0, height = 0;
+    std::string note;
+    renderOutput(false, width, height, note);
+    std::vector<unsigned char> pixels;
+    if (!renderer_.readUvPixels(pixels, width, height) ||
+        !stbi_write_png(path.c_str(), width, height, 3, pixels.data(), width * 3)) {
+        log("Could not save " + path + ".");
+        return false;
+    }
+    log("Exported " + fileNameOf(path) + " (" + sizeText(width, height) + ").");
+    return true;
+}
+
+bool App::uvSurfaceCombo() {
+    const int current = resolvedUvSurface();
+    const bool perSurfaceUv01 = uvChannel_ == 0 && anyLedSurface();
+    std::string preview = current == kProjectionSurfaces ? "Projection surfaces" : surfaceLabel(current);
+    bool changed = false;
+    if (ImGui::BeginCombo("##uvsurface", preview.c_str())) {
+        if (perSurfaceUv01) {
+            if (anyProjectionSurface() && ImGui::Selectable("Projection surfaces", current == kProjectionSurfaces)) {
+                uvSurface_ = kProjectionSurfaces;
+                changed = true;
+            }
+        } else if (ImGui::Selectable("All surfaces", current == kAllSurfaces)) {
+            uvSurface_ = kAllSurfaces;
+            changed = true;
+        }
+        for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
+            if (perSurfaceUv01 && !isLedSurface(s)) continue;
+            if (ImGui::Selectable(mesh_.surfaces[s].name.c_str(), current == s)) {
+                uvSurface_ = s;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+void App::drawUvView() {
+    if (!showUvView_) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    const bool open = ImGui::Begin(kUvWindow, &showUvView_);
+    ImGui::PopStyleVar();
+    if (!open) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + 8, ImGui::GetCursorPosY() + 6));
+    if (mesh_.empty()) {
+        ImGui::TextColored(kMutedColor, "Open a mesh to see its UV layouts.");
+        ImGui::End();
+        return;
+    }
+    if (!channelUsable(uvChannel_)) {
+        uvChannel_ = 0;
+        while (uvChannel_ < (int)channels_.size() && !channelUsable(uvChannel_)) ++uvChannel_;
+    }
+
+    ImGui::SetNextItemWidth(80);
+    channelCombo("##uvchannel", uvChannel_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150);
+    uvSurfaceCombo();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::BeginCombo("##uvshow", uvMappingOnly_ ? "This mapping only" : "Output (all layers)")) {
+        if (ImGui::Selectable("Output (all layers)", !uvMappingOnly_)) uvMappingOnly_ = false;
+        if (ImGui::Selectable("This mapping only", uvMappingOnly_)) uvMappingOnly_ = true;
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Output: every layer combined, as this UV layout would receive it.\n"
+                          "This mapping only: just the layers placed on this mapping.");
+
+    if (!channelUsable(uvChannel_)) {
+        ImGui::TextColored(kMutedColor, "Every UV channel is ignored.");
+        ImGui::End();
+        return;
+    }
+
+    int outputWidth = 0, outputHeight = 0;
+    std::string note;
+    renderOutput(uvWireframe_, outputWidth, outputHeight, note);
+
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("%s  %s", channelLabel(uvChannel_).c_str(), sizeText(outputWidth, outputHeight).c_str());
+    ImGui::SameLine();
+    ImGui::Checkbox("Wireframe##uv", &uvWireframe_);
+    ImGui::SameLine();
+    if (ImGui::Button("Fit")) uvZoom_ = 0.0f;
+    ImGui::SameLine();
+    if (ImGui::Button("1:1")) {
+        uvZoom_ = 1.0f;
+        uvPan_[0] = uvPan_[1] = 0.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export PNG...")) {
+        const std::string path = savePngDialog(outputName());
+        if (!path.empty()) exportOutputPng(path);
+    }
+    if (!note.empty()) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
+        ImGui::TextColored(kWarningColor, "%s", note.c_str());
+    }
+    ImGui::Dummy(ImVec2(0, 2));
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 area = ImGui::GetContentRegionAvail();
+    const float areaWidth = std::max(1.0f, area.x), areaHeight = std::max(1.0f, area.y);
+    ImGui::InvisibleButton("uvcanvas", ImVec2(areaWidth, areaHeight),
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+                               ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered = ImGui::IsItemHovered();
+
+    const float fitZoom = std::min((areaWidth - 24.0f) / outputWidth, (areaHeight - 24.0f) / outputHeight);
+    if (uvZoom_ <= 0.0f) {
+        uvPan_[0] = uvPan_[1] = 0.0f;
+    }
+    float zoom = uvZoom_ > 0.0f ? uvZoom_ : std::max(fitZoom, 0.01f);
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 center(origin.x + areaWidth * 0.5f, origin.y + areaHeight * 0.5f);
+    if (ImGui::IsItemActive()) {
+        uvZoom_ = zoom;
+        uvPan_[0] += io.MouseDelta.x;
+        uvPan_[1] += io.MouseDelta.y;
+    }
+    if (hovered && io.MouseWheel != 0.0f) {
+        // Zoom around the cursor.
+        const float newZoom = std::clamp(zoom * std::pow(1.2f, io.MouseWheel), 0.01f, 64.0f);
+        const float mx = io.MousePos.x - center.x - uvPan_[0], my = io.MousePos.y - center.y - uvPan_[1];
+        uvPan_[0] -= mx * (newZoom / zoom - 1.0f);
+        uvPan_[1] -= my * (newZoom / zoom - 1.0f);
+        zoom = uvZoom_ = newZoom;
+    }
+
+    const float imageWidth = outputWidth * zoom, imageHeight = outputHeight * zoom;
+    const ImVec2 imageMin(center.x + uvPan_[0] - imageWidth * 0.5f, center.y + uvPan_[1] - imageHeight * 0.5f);
+    const ImVec2 imageMax(imageMin.x + imageWidth, imageMin.y + imageHeight);
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->PushClipRect(origin, ImVec2(origin.x + areaWidth, origin.y + areaHeight), true);
+    drawList->AddRectFilled(origin, ImVec2(origin.x + areaWidth, origin.y + areaHeight), IM_COL32(28, 29, 33, 255));
+    drawList->AddImage((ImTextureID)(intptr_t)renderer_.uvTexture(), imageMin, imageMax, ImVec2(0, 1), ImVec2(1, 0));
+    drawList->AddRect(ImVec2(imageMin.x - 1, imageMin.y - 1), ImVec2(imageMax.x + 1, imageMax.y + 1),
+                      IM_COL32(120, 125, 135, 255));
+    if (hovered && io.MousePos.x >= imageMin.x && io.MousePos.x < imageMax.x && io.MousePos.y >= imageMin.y &&
+        io.MousePos.y < imageMax.y) {
+        const float u = (io.MousePos.x - imageMin.x) / imageWidth;
+        const float v = 1.0f - (io.MousePos.y - imageMin.y) / imageHeight;
+        char text[96];
+        std::snprintf(text, sizeof(text), "Pixel %d, %d   UV %.4f, %.4f", (int)(u * outputWidth),
+                      (int)((1.0f - v) * outputHeight), u, v);
+        drawList->AddText(ImVec2(origin.x + 10, origin.y + areaHeight - 44), IM_COL32(200, 205, 215, 255), text);
+    }
+    char zoomText[64];
+    std::snprintf(zoomText, sizeof(zoomText), "Zoom %.0f%%   Wheel: zoom   Drag: pan", zoom * 100.0f);
+    drawList->AddText(ImVec2(origin.x + 10, origin.y + areaHeight - 24), IM_COL32(120, 125, 135, 255), zoomText);
+    drawList->PopClipRect();
     ImGui::End();
 }
 

@@ -16,6 +16,14 @@ std::string toUtf8(const wchar_t* wide) {
     return text;
 }
 
+std::wstring toWide(const std::string& text) {
+    const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    if (size <= 1) return {};
+    std::wstring wide(size - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), size);
+    return wide;
+}
+
 }  // namespace
 
 bool nativeDialogsAvailable() { return true; }
@@ -56,10 +64,27 @@ std::string pickFolderDialog() {
     return result;
 }
 
+std::string savePngDialog(const std::string& suggestedName) {
+    wchar_t buffer[MAX_PATH * 4] = L"";
+    const std::wstring suggested = toWide(suggestedName);
+    if (suggested.size() < sizeof(buffer) / sizeof(buffer[0])) wcscpy_s(buffer, suggested.c_str());
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = (DWORD)(sizeof(buffer) / sizeof(buffer[0]));
+    ofn.lpstrFilter = L"PNG image (*.png)\0*.png\0";
+    ofn.lpstrDefExt = L"png";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return {};
+    return toUtf8(buffer);
+}
+
 #else
 
 bool nativeDialogsAvailable() { return false; }
 std::string openFileDialog(FileKind) { return {}; }
 std::string pickFolderDialog() { return {}; }
+// Without a dialog the PNG goes to the working folder under the suggested name.
+std::string savePngDialog(const std::string& suggestedName) { return suggestedName; }
 
 #endif

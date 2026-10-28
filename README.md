@@ -40,7 +40,7 @@ MultiChannelUVPlayer.exe [mesh.fbx] [images or folders...] [--view N] [--wirefra
 
 ## Building from source
 
-Needs CMake 3.24+ and Visual Studio 2022 (or any C++20 compiler). Dependencies (GLFW, Dear ImGui, ufbx, stb) are fetched by CMake; the OpenGL loader is in `third_party/glad`.
+Needs CMake 3.24+ and a recent Visual Studio (or any C++20 compiler). Dependencies (GLFW, Dear ImGui, ufbx, stb) are fetched by CMake; the OpenGL loader is in `third_party/glad`.
 
 ```
 cmake -S . -B build

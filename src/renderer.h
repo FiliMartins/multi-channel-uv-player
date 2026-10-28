@@ -52,6 +52,17 @@ struct ViewSettings {
     std::vector<unsigned char> ledSurfaces;  // 1 per LED surface, indexed by surface
 };
 
+// The mesh unwrapped into one UV channel's 0-1 square: what that output would
+// show, at the mapping's pixel size.
+struct UvViewSettings {
+    int channel = 0;
+    int surface = kAllSurfaces;       // a surface index, kAllSurfaces or kProjectionSurfaces
+    int width = 1024, height = 1024;  // output pixels
+    std::vector<RenderLayer> layers;  // at most kMaxLayers, bottom to top
+    std::vector<unsigned char> ledSurfaces;
+    bool wireframe = false;
+};
+
 // Draws the mesh into an offscreen colour buffer that the UI shows as an image.
 class Renderer {
 public:
@@ -61,9 +72,15 @@ public:
     void render(int width, int height, const OrbitCamera& camera, const ViewSettings& view);
     unsigned colorTexture() const { return colorTexture_; }
 
+    void renderUv(const UvViewSettings& view);
+    unsigned uvTexture() const { return uvTexture_; }
+    // Reads back the last renderUv() result as RGB rows, top row first.
+    bool readUvPixels(std::vector<unsigned char>& rgb, int& width, int& height) const;
+
 private:
     void resizeTarget(int width, int height);
     void uploadLedSurfaces(const std::vector<unsigned char>& flags);
+    void bindLayers(const std::vector<RenderLayer>& layers, const std::vector<unsigned char>& ledSurfaces);
 
     unsigned meshProgram_ = 0;
     unsigned lineProgram_ = 0;
@@ -76,4 +93,6 @@ private:
     bool ledValid_ = false;
     unsigned framebuffer_ = 0, colorTexture_ = 0, depthBuffer_ = 0;
     int targetWidth_ = 0, targetHeight_ = 0;
+    unsigned uvFramebuffer_ = 0, uvTexture_ = 0;
+    int uvWidth_ = 0, uvHeight_ = 0;
 };

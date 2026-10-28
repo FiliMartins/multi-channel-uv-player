@@ -18,6 +18,7 @@ layout(location = 1) in float aSurface;
 layout(location = 2) in vec2 aUv[8];
 uniform mat4 uViewProjection;
 uniform float uScale;
+uniform int uLayoutChannel;  // -1: 3D view; otherwise draw flat in this channel's UV square
 out vec3 vWorld;
 flat out int vSurface;
 out vec2 vUv[8];
@@ -25,8 +26,13 @@ void main() {
     vec3 world = aPosition * uScale;
     vWorld = world;
     vSurface = int(aSurface + 0.5);
-    for (int i = 0; i < 8; ++i) vUv[i] = aUv[i];
-    gl_Position = uViewProjection * vec4(world, 1.0);
+    vec2 layoutUv = vec2(0.0);
+    for (int i = 0; i < 8; ++i) {
+        vUv[i] = aUv[i];
+        if (i == uLayoutChannel) layoutUv = aUv[i];
+    }
+    gl_Position = uLayoutChannel >= 0 ? vec4(layoutUv * 2.0 - 1.0, 0.0, 1.0)
+                                      : uViewProjection * vec4(world, 1.0);
 }
 )";
 
@@ -41,6 +47,8 @@ uniform int uMode;  // 0 layers, 1 mesh only, 2 UV test grid
 uniform int uGridChannel;
 uniform bool uGridClamp;
 uniform bool uWire;
+uniform int uOnlySurface;  // -1 every surface, -2 projection surfaces only, else one surface
+uniform bool uOutput;      // output preview: no mesh shading, black where no layer covers
 uniform int uLayerCount;
 uniform int uLayerChannel[MAX_LAYERS];
 uniform int uLayerSurface[MAX_LAYERS];
@@ -87,10 +95,14 @@ vec4 sampleLayer(sampler2D tex, vec2 uv, bool clampUv) {
     return vec4(texel.a > 0.0 ? texel.rgb / texel.a : vec3(0.0), texel.a);
 }
 
+bool isLedSurface() {
+    return texelFetch(uLedSurfaces, ivec2(vSurface, 0), 0).r > 0.5;
+}
+
 void applyLayer(int i, vec2 uv, vec4 texel) {
     float visible = uLayerClamp[i] && !insideUnitSquare(uv) ? 0.0 : 1.0;
     if (uLayerSurface[i] >= 0 && uLayerSurface[i] != vSurface) visible = 0.0;
-    if (uLayerSurface[i] == -2 && texelFetch(uLedSurfaces, ivec2(vSurface, 0), 0).r > 0.5) visible = 0.0;
+    if (uLayerSurface[i] == -2 && isLedSurface()) visible = 0.0;
     float amount = visible * uLayerOpacity[i];
     float weight = amount * texel.a;
     int blend = uLayerBlend[i];
@@ -114,13 +126,15 @@ void applyLayer(int i, vec2 uv, vec4 texel) {
 }
 
 void main() {
+    if (uOnlySurface >= 0 && vSurface != uOnlySurface) discard;
+    if (uOnlySurface == -2 && isLedSurface()) discard;
     if (uWire) {
         fragColor = vec4(0.9, 0.9, 0.9, 0.35);
         return;
     }
     vec3 normal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
     float shade = 0.55 + 0.45 * abs(dot(normal, normalize(vec3(0.3, 0.8, 0.5))));
-    vec3 base = vec3(0.16, 0.17, 0.19) * shade;
+    vec3 base = uOutput ? vec3(0.0) : vec3(0.16, 0.17, 0.19) * shade;
     if (uMode == 1) {
         fragColor = vec4(base * 1.6, 1.0);
         return;
@@ -353,6 +367,8 @@ void Renderer::shutdown() {
     glDeleteFramebuffers(1, &framebuffer_);
     glDeleteTextures(1, &colorTexture_);
     glDeleteTextures(1, &ledTexture_);
+    glDeleteFramebuffers(1, &uvFramebuffer_);
+    glDeleteTextures(1, &uvTexture_);
     glDeleteRenderbuffers(1, &depthBuffer_);
 }
 
@@ -399,6 +415,37 @@ void Renderer::uploadLedSurfaces(const std::vector<unsigned char>& flags) {
     ledValid_ = true;
 }
 
+void Renderer::bindLayers(const std::vector<RenderLayer>& layers, const std::vector<unsigned char>& ledSurfaces) {
+    const int layerCount = std::min((int)layers.size(), kMaxLayers);
+    int channel[kMaxLayers] = {}, surface[kMaxLayers] = {}, blend[kMaxLayers] = {}, clampUv[kMaxLayers] = {};
+    int units[kMaxLayers];
+    float opacity[kMaxLayers] = {};
+    for (int i = 0; i < kMaxLayers; ++i) {
+        units[i] = i;
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, i < layerCount ? layers[i].texture : 0);
+        if (i >= layerCount) continue;
+        const RenderLayer& layer = layers[i];
+        channel[i] = layer.channel;
+        surface[i] = layer.surface;
+        blend[i] = (int)layer.blend;
+        clampUv[i] = layer.clamp;
+        opacity[i] = layer.opacity;
+    }
+    uploadLedSurfaces(ledSurfaces);
+    glActiveTexture(GL_TEXTURE0 + kMaxLayers);
+    glBindTexture(GL_TEXTURE_2D, ledTexture_);
+    glUniform1i(glGetUniformLocation(meshProgram_, "uLedSurfaces"), kMaxLayers);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(glGetUniformLocation(meshProgram_, "uLayerCount"), layerCount);
+    glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerChannel"), kMaxLayers, channel);
+    glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerSurface"), kMaxLayers, surface);
+    glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerBlend"), kMaxLayers, blend);
+    glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerClamp"), kMaxLayers, clampUv);
+    glUniform1fv(glGetUniformLocation(meshProgram_, "uLayerOpacity"), kMaxLayers, opacity);
+    glUniform1iv(glGetUniformLocation(meshProgram_, "uTexture"), kMaxLayers, units);
+}
+
 void Renderer::render(int width, int height, const OrbitCamera& camera, const ViewSettings& view) {
     width = std::max(width, 1);
     height = std::max(height, 1);
@@ -431,34 +478,10 @@ void Renderer::render(int width, int height, const OrbitCamera& camera, const Vi
         glUniform1i(glGetUniformLocation(meshProgram_, "uGridClamp"), view.gridClamp);
         glUniform1i(glGetUniformLocation(meshProgram_, "uWire"), 0);
 
-        const int layerCount = std::min((int)view.layers.size(), kMaxLayers);
-        int channel[kMaxLayers] = {}, surface[kMaxLayers] = {}, blend[kMaxLayers] = {}, clampUv[kMaxLayers] = {};
-        int units[kMaxLayers];
-        float opacity[kMaxLayers] = {};
-        for (int i = 0; i < kMaxLayers; ++i) {
-            units[i] = i;
-            glActiveTexture(GL_TEXTURE0 + i);
-            glBindTexture(GL_TEXTURE_2D, i < layerCount ? view.layers[i].texture : 0);
-            if (i >= layerCount) continue;
-            const RenderLayer& layer = view.layers[i];
-            channel[i] = layer.channel;
-            surface[i] = layer.surface;
-            blend[i] = (int)layer.blend;
-            clampUv[i] = layer.clamp;
-            opacity[i] = layer.opacity;
-        }
-        uploadLedSurfaces(view.ledSurfaces);
-        glActiveTexture(GL_TEXTURE0 + kMaxLayers);
-        glBindTexture(GL_TEXTURE_2D, ledTexture_);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uLedSurfaces"), kMaxLayers);
-        glActiveTexture(GL_TEXTURE0);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uLayerCount"), layerCount);
-        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerChannel"), kMaxLayers, channel);
-        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerSurface"), kMaxLayers, surface);
-        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerBlend"), kMaxLayers, blend);
-        glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerClamp"), kMaxLayers, clampUv);
-        glUniform1fv(glGetUniformLocation(meshProgram_, "uLayerOpacity"), kMaxLayers, opacity);
-        glUniform1iv(glGetUniformLocation(meshProgram_, "uTexture"), kMaxLayers, units);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uLayoutChannel"), -1);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uOnlySurface"), kAllSurfaces);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uOutput"), 0);
+        bindLayers(view.layers, view.ledSurfaces);
         glBindVertexArray(meshVao_);
 
         glEnable(GL_POLYGON_OFFSET_FILL);
@@ -481,4 +504,83 @@ void Renderer::render(int width, int height, const OrbitCamera& camera, const Vi
     glUseProgram(0);
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::renderUv(const UvViewSettings& view) {
+    const int width = std::max(view.width, 1), height = std::max(view.height, 1);
+    if (!uvFramebuffer_) {
+        glGenFramebuffers(1, &uvFramebuffer_);
+        glGenTextures(1, &uvTexture_);
+    }
+    if (width != uvWidth_ || height != uvHeight_) {
+        uvWidth_ = width;
+        uvHeight_ = height;
+        glBindTexture(GL_TEXTURE_2D, uvTexture_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        // Nearest when magnified, so zooming in shows the real output pixels.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindFramebuffer(GL_FRAMEBUFFER, uvFramebuffer_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, uvTexture_, 0);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, uvFramebuffer_);
+    glViewport(0, 0, width, height);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    if (meshVertexCount_ > 0) {
+        glUseProgram(meshProgram_);
+        glUniform1f(glGetUniformLocation(meshProgram_, "uScale"), 1.0f);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uLayoutChannel"), view.channel);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uOnlySurface"), view.surface);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uOutput"), 1);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uMode"), (int)ViewMode::Layers);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uWire"), 0);
+        bindLayers(view.layers, view.ledSurfaces);
+        glBindVertexArray(meshVao_);
+        glDrawArrays(GL_TRIANGLES, 0, meshVertexCount_);
+
+        if (view.wireframe) {
+            glUniform1i(glGetUniformLocation(meshProgram_, "uWire"), 1);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glDrawArrays(GL_TRIANGLES, 0, meshVertexCount_);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glDisable(GL_BLEND);
+        }
+    }
+
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+bool Renderer::readUvPixels(std::vector<unsigned char>& rgb, int& width, int& height) const {
+    if (!uvFramebuffer_ || uvWidth_ <= 0 || uvHeight_ <= 0) return false;
+    width = uvWidth_;
+    height = uvHeight_;
+    std::vector<unsigned char> rgba((size_t)width * height * 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, uvFramebuffer_);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // OpenGL rows start at the bottom (V = 0); images start at the top.
+    rgb.resize((size_t)width * height * 3);
+    for (int y = 0; y < height; ++y) {
+        const unsigned char* source = rgba.data() + (size_t)(height - 1 - y) * width * 4;
+        unsigned char* target = rgb.data() + (size_t)y * width * 3;
+        for (int x = 0; x < width; ++x) {
+            target[x * 3 + 0] = source[x * 4 + 0];
+            target[x * 3 + 1] = source[x * 4 + 1];
+            target[x * 3 + 2] = source[x * 4 + 2];
+        }
+    }
+    return true;
 }

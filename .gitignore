@@ -1,5 +1,5 @@
 build/
 out/
 .vs/
-imgui_layout.ini
+imgui_layout*.ini
 *.user

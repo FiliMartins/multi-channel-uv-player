@@ -53,6 +53,10 @@ public:
     void setSurfaceLed(int surface, bool led);  // used in Mixed mode
     void showTestGrid(int channel);
     void setWireframe(bool on) { view_.wireframe = on; }
+    // Shows the UV view on a channel; surface is an index, kAllSurfaces or kProjectionSurfaces.
+    void showUvView(int channel, int surface);
+    // Renders the UV view's output at full size and saves it; returns false on failure.
+    bool exportOutputPng(const std::string& path);
 
 private:
     void importFolder(const std::string& folder);
@@ -88,6 +92,14 @@ private:
     bool channelCombo(const char* id, int& channel);
     bool surfaceCombo(const char* id, int& surface);
     void drawViewport();
+    void drawUvView();
+    bool uvSurfaceCombo();
+    int resolvedUvSurface() const;
+    void outputSize(int& width, int& height, std::string& note) const;
+    std::string outputName() const;
+    std::vector<RenderLayer> renderLayers(int onlyChannel) const;
+    std::vector<unsigned char> ledFlags() const;
+    void renderOutput(bool wireframe, int& width, int& height, std::string& note);
     void drawLog();
 
     Mesh mesh_;
@@ -106,5 +118,14 @@ private:
     int nextLayerId_ = 1;
     int maxTextureSize_ = 4096;
     bool layoutBuilt_ = false;
+
+    // UV view
+    bool showUvView_ = true;
+    int uvChannel_ = 0;
+    int uvSurface_ = kAllSurfaces;
+    bool uvMappingOnly_ = false;  // only the layers on this mapping, not the full output
+    bool uvWireframe_ = false;
+    float uvZoom_ = 0.0f;         // screen pixels per output pixel; 0 = fit to the window
+    float uvPan_[2] = {0, 0};     // offset of the image centre from the view centre, in screen pixels
     char pathInput_[1024] = "";
 };

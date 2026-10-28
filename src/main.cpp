@@ -1,8 +1,11 @@
 // Multi-Channel UV Player: plays media onto the UV channels of an FBX mesh.
 //
 // Usage: MultiChannelUVPlayer [mesh.fbx] [images or folders...]
-//        [--led | --mixed N,N...] [--grid N] [--wireframe] [--size WxH] [--screenshot out.png]
+//        [--led | --mixed N,N...] [--grid N] [--wireframe]
+//        [--uv N[:S]] [--export out.png] [--size WxH] [--screenshot out.png]
 // --mixed sets Mixed mode with the listed surfaces (1-based) as LED.
+// --uv shows UV channel N in the UV view, optionally surface S (1-based); --export
+// saves that view's output as a PNG.
 // --screenshot renders a few frames, saves the window to a PNG and exits (used for testing).
 
 #include <cstdio>
@@ -111,6 +114,8 @@ int main(int argc, char** argv) {
     bool led = false;
     std::vector<int> mixedLed;  // 1-based surfaces set to LED in Mixed mode
     bool mixed = false;
+    int uvChannel = 0, uvSurface = 0;  // 1-based, 0 = default
+    std::string exportPath;
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -120,6 +125,8 @@ int main(int argc, char** argv) {
         if (arg == "--screenshot" && hasValue) screenshotPath = args[++i];
         else if (arg == "--grid" && hasValue) gridChannel = std::atoi(args[++i].c_str());
         else if (arg == "--led") led = true;
+        else if (arg == "--uv" && hasValue) std::sscanf(args[++i].c_str(), "%d:%d", &uvChannel, &uvSurface);
+        else if (arg == "--export" && hasValue) exportPath = args[++i];
         else if (arg == "--mixed" && hasValue) {
             mixed = true;
             for (const char* p = args[++i].c_str(); *p;) {
@@ -165,7 +172,7 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
-    io.IniFilename = screenshotPath.empty() ? "imgui_layout.ini" : nullptr;
+    io.IniFilename = screenshotPath.empty() ? "imgui_layout_v3.ini" : nullptr;
     setupStyle();
     loadFont();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -185,6 +192,8 @@ int main(int argc, char** argv) {
     if (mixed) app.setMode(MappingMode::Mixed);
     for (const std::string& input : inputs) app.importPath(input);
     for (int surface : mixedLed) app.setSurfaceLed(surface - 1, true);
+    if (uvChannel > 0) app.showUvView(uvChannel - 1, uvSurface > 0 ? uvSurface - 1 : kAllSurfaces);
+    if (!exportPath.empty()) app.exportOutputPng(exportPath);
     if (gridChannel > 0) app.showTestGrid(gridChannel - 1);
     if (wireframe) app.setWireframe(true);
 

@@ -1,0 +1,32 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item build/Release/MultiChannelUVPlayer.exe package/
+          Copy-Item README.md package/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiChannelUVPlayer-windows
+          path: package/

@@ -132,9 +132,12 @@ vec4 testPattern(vec2 p, vec2 q) {
     float runner = fract(uTime * uSpeed * 0.25) * (res.x - block);
     if (p.y > 4.0 && p.y < 4.0 + block && p.x > runner && p.x < runner + block) { color = uColor; alpha = 1.0; }
 
-    float scale = max(2.0, floor(res.y / 80.0));
-    float textWidth = float(uTextLength) * 4.0 * scale;
-    if (textAt(q, vec2(floor((res.x - textWidth) * 0.5), floor(res.y * 0.08)), scale)) { color = uColor; alpha = 1.0; }
+    // Name centred just below the grey ramp, kept within the ramp's width.
+    float scale = max(1.0, floor(res.y / 160.0));
+    while (scale > 1.0 && float(uTextLength) * 4.0 * scale > res.x * 0.6) scale -= 1.0;
+    float textWidth = float(uTextLength) * 4.0 * scale - scale;
+    vec2 textOrigin = vec2(floor((res.x - textWidth) * 0.5), floor(res.y * 0.60) + 2.0 * scale);
+    if (textAt(q, textOrigin, scale)) { color = uColor; alpha = 1.0; }
     return vec4(color, alpha);
 }
 

@@ -10,7 +10,8 @@
 // Projection: every UV channel is a layout shared by the whole mesh.
 // LED: UV channel 1 is per surface (each surface fills its own 0-1, like feed
 // mapping); channels 2 and up stay shared layouts such as the output map.
-enum class MappingMode { Projection, Led };
+// Mixed: each surface is set to Projection or LED on its own.
+enum class MappingMode { Projection, Led, Mixed };
 
 struct ChannelState {
     bool clamp = true;        // show content only inside the 0-1 UV square
@@ -23,7 +24,7 @@ struct Layer {
     int id = 0;
     Image image;
     int channel = 0;
-    int surface = -1;  // -1 = every surface
+    int surface = -1;  // -1 = every surface (on UV01: every projection surface)
     BlendMode blend = BlendMode::Normal;
     float opacity = 1.0f;
     bool visible = true;
@@ -49,6 +50,7 @@ public:
     void importPath(const std::string& path);
     void openMesh(const std::string& path);
     void setMode(MappingMode mode);
+    void setSurfaceLed(int surface, bool led);  // used in Mixed mode
     void showTestGrid(int channel);
     void setWireframe(bool on) { view_.wireframe = on; }
 
@@ -60,10 +62,16 @@ private:
     void moveLayer(int from, int to);
     void retryPending();
     int matchSurface(const std::string& fileName) const;
+    bool isLedSurface(int surface) const;
+    bool anyLedSurface() const;
+    bool anyProjectionSurface() const;
+    bool perSurface(int channel, int surface) const;
     bool needsSurface(int channel) const;
+    void placeLedLayers();
     bool channelUsable(int channel) const;
     std::string channelLabel(int channel) const;
     std::string surfaceLabel(int surface) const;
+    std::string placementLabel(int channel, int surface) const;
     void canvasSize(int channel, int surface, int& width, int& height) const;
     std::vector<std::string> layerWarnings(const Layer& layer) const;
     int selectedIndex() const;
@@ -71,6 +79,7 @@ private:
 
     void drawProjectPanel();
     void drawMeshSection();
+    void drawSurfaceSection();
     void drawChannelSection();
     void drawLayersPanel();
     void drawLayerList();
@@ -83,6 +92,7 @@ private:
 
     Mesh mesh_;
     MappingMode mode_ = MappingMode::Projection;
+    std::vector<unsigned char> mixedLed_;  // per surface, the LED choice used in Mixed mode
     std::vector<ChannelState> channels_;
     std::vector<Layer> layers_;  // bottom to top
     std::vector<PendingFile> pending_;

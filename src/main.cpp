@@ -1,7 +1,8 @@
 // Multi-Channel UV Player: plays media onto the UV channels of an FBX mesh.
 //
 // Usage: MultiChannelUVPlayer [mesh.fbx] [images or folders...]
-//        [--led] [--grid N] [--wireframe] [--size WxH] [--screenshot out.png]
+//        [--led | --mixed N,N...] [--grid N] [--wireframe] [--size WxH] [--screenshot out.png]
+// --mixed sets Mixed mode with the listed surfaces (1-based) as LED.
 // --screenshot renders a few frames, saves the window to a PNG and exits (used for testing).
 
 #include <cstdio>
@@ -108,6 +109,8 @@ int main(int argc, char** argv) {
     std::string screenshotPath;
     int gridChannel = 0;  // 1-based on the command line, 0 = show the layers
     bool led = false;
+    std::vector<int> mixedLed;  // 1-based surfaces set to LED in Mixed mode
+    bool mixed = false;
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -117,6 +120,16 @@ int main(int argc, char** argv) {
         if (arg == "--screenshot" && hasValue) screenshotPath = args[++i];
         else if (arg == "--grid" && hasValue) gridChannel = std::atoi(args[++i].c_str());
         else if (arg == "--led") led = true;
+        else if (arg == "--mixed" && hasValue) {
+            mixed = true;
+            for (const char* p = args[++i].c_str(); *p;) {
+                char* end = nullptr;
+                const long n = std::strtol(p, &end, 10);
+                if (end == p) break;
+                mixedLed.push_back((int)n);
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
         else if (arg == "--wireframe") wireframe = true;
         else if (arg == "--size" && hasValue) std::sscanf(args[++i].c_str(), "%dx%d", &windowWidth, &windowHeight);
         else inputs.push_back(arg);
@@ -169,7 +182,9 @@ int main(int argc, char** argv) {
     glfwSetWindowUserPointer(window, &app);
     glfwSetDropCallback(window, onDrop);
     if (led) app.setMode(MappingMode::Led);
+    if (mixed) app.setMode(MappingMode::Mixed);
     for (const std::string& input : inputs) app.importPath(input);
+    for (int surface : mixedLed) app.setSurfaceLed(surface - 1, true);
     if (gridChannel > 0) app.showTestGrid(gridChannel - 1);
     if (wireframe) app.setWireframe(true);
 

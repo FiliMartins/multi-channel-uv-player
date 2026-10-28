@@ -18,7 +18,7 @@ Every push builds a Windows version automatically. On GitHub, open **Actions →
 - **Layer stack:** one global stack, top to bottom. Each layer has an image, a mapping (UV channel), an optional surface, a blend mode (Normal, Add, Multiply, Screen, Mask) and an opacity. Drag rows to reorder, or use Up and Down. Up to 15 visible layers are drawn.
 - **Warnings per layer:** a file smaller than its mapping, or with a different aspect ratio, is flagged.
 - **Folder import:** each image becomes a layer. A file is placed when its name contains `UV` or `uv` followed by one or two digits, anywhere in the name (`UV03_logo.png`, `wall_uv3.png`). Files without a usable tag wait under *Unassigned files* for you to pick a mapping.
-- **Projection and LED modes:** in Projection mode every channel is shared by the whole mesh. In LED mode UV01 is per surface, like feed mapping: a UV01 file must also name its surface (`Wall_1_UV1.png` goes on Wall 1; case, spaces and underscores are ignored). UV02 and up stay shared layouts such as the output map.
+- **Projection, LED and Mixed modes:** in Projection mode every channel is shared by the whole mesh. In LED mode UV01 is per surface, like feed mapping: a UV01 file must also name its surface (`Wall_1_UV1.png` goes on Wall 1; case, spaces, underscores and UV tags in the surface name are ignored, so a surface called `Wall 1 uv01` matches too). Each LED surface has its own UV01 resolution, listed under Surfaces. UV02 and up stay shared layouts such as the output map. In Mixed mode each surface is set to Projection or LED; UV01 files that name no LED surface are shared by the projection surfaces.
 - **3D view:** shows the layers, the bare mesh, or a coloured test grid on any channel. Wireframe and floor grid toggles.
 - **Drag and drop** FBX files, images or folders onto the window.
 
@@ -36,10 +36,10 @@ Supported images: PNG, JPG, TGA, BMP. Images larger than the GPU's texture limit
 ## Command line
 
 ```
-MultiChannelUVPlayer.exe [mesh.fbx] [images or folders...] [--led] [--grid N] [--wireframe]
+MultiChannelUVPlayer.exe [mesh.fbx] [images or folders...] [--led | --mixed N,N...] [--grid N] [--wireframe]
 ```
 
-`--led` starts in LED mode. `--grid N` shows the test grid on UV channel N. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
+`--led` starts in LED mode. `--mixed 1,3` starts in Mixed mode with surfaces 1 and 3 set to LED. `--grid N` shows the test grid on UV channel N. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
 
 ## Building from source
 

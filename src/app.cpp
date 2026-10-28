@@ -50,6 +50,24 @@ std::string normalizedName(const std::string& text) {
     return result;
 }
 
+// Drops UV tags such as "uv01" from a normalized name, so a surface called
+// "Wall 1 uv01" still matches a file called "Wall_1_UV1.png".
+std::string withoutUvTags(const std::string& name) {
+    std::string result;
+    for (size_t i = 0; i < name.size();) {
+        size_t digits = 0;
+        if (name.compare(i, 2, "uv") == 0)
+            while (i + 2 + digits < name.size() && std::isdigit((unsigned char)name[i + 2 + digits])) ++digits;
+        if (digits == 1 || digits == 2) {
+            i += 2 + digits;
+        } else {
+            result += name[i];
+            ++i;
+        }
+    }
+    return result;
+}
+
 std::string sizeText(int width, int height) {
     return std::to_string(width) + " x " + std::to_string(height) + " px";
 }
@@ -84,12 +102,42 @@ std::string App::surfaceLabel(int surface) const {
     return mesh_.surfaces[surface].name;
 }
 
+std::string App::placementLabel(int channel, int surface) const {
+    if (surface >= 0) return channelLabel(channel) + ", " + surfaceLabel(surface);
+    if (channel == 0 && anyLedSurface() && anyProjectionSurface()) return channelLabel(channel) + ", projection surfaces";
+    return channelLabel(channel);
+}
+
 bool App::channelUsable(int channel) const {
     return channel >= 0 && channel < (int)channels_.size() && !channels_[channel].ignored;
 }
 
+bool App::isLedSurface(int surface) const {
+    if (surface < 0 || surface >= (int)mesh_.surfaces.size()) return false;
+    if (mode_ == MappingMode::Led) return true;
+    return mode_ == MappingMode::Mixed && surface < (int)mixedLed_.size() && mixedLed_[surface];
+}
+
+bool App::anyLedSurface() const {
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s)
+        if (isLedSurface(s)) return true;
+    return false;
+}
+
+bool App::anyProjectionSurface() const {
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s)
+        if (!isLedSurface(s)) return true;
+    return false;
+}
+
+// UV01 on an LED surface has its own canvas per surface.
+bool App::perSurface(int channel, int surface) const {
+    return channel == 0 && isLedSurface(surface);
+}
+
+// A UV01 layer must name its surface when no projection surface could take it.
 bool App::needsSurface(int channel) const {
-    return mode_ == MappingMode::Led && channel == 0;
+    return channel == 0 && anyLedSurface() && !anyProjectionSurface();
 }
 
 int App::selectedIndex() const {
@@ -99,11 +147,11 @@ int App::selectedIndex() const {
 }
 
 int App::matchSurface(const std::string& fileName) const {
-    const std::string name = normalizedName(fileName);
+    const std::string name = withoutUvTags(normalizedName(fileName));
     int best = -1;
     size_t bestLength = 0;
     for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
-        const std::string surface = normalizedName(mesh_.surfaces[s].name);
+        const std::string surface = withoutUvTags(normalizedName(mesh_.surfaces[s].name));
         // The longest match wins, so "Wall_10" picks "Wall 10" over "Wall 1".
         if (!surface.empty() && surface.size() > bestLength && name.find(surface) != std::string::npos) {
             best = s;
@@ -116,13 +164,28 @@ int App::matchSurface(const std::string& fileName) const {
 void App::setMode(MappingMode mode) {
     if (mode_ == mode) return;
     mode_ = mode;
-    if (mode_ == MappingMode::Led) {
-        log("LED mode: UV01 is per surface; UV02 and up are shared layouts.");
-        for (Layer& layer : layers_)
-            if (layer.channel == 0 && layer.surface < 0) layer.surface = matchSurface(layer.image.name);
-    } else {
-        log("Projection mode: every UV channel is shared by the whole mesh.");
+    if (mode_ == MappingMode::Led) log("LED mode: UV01 is per surface; UV02 and up are shared layouts.");
+    else if (mode_ == MappingMode::Mixed) log("Mixed mode: choose Projection or LED for each surface under Surfaces.");
+    else log("Projection mode: every UV channel is shared by the whole mesh.");
+    placeLedLayers();
+}
+
+void App::setSurfaceLed(int surface, bool led) {
+    if (surface < 0 || surface >= (int)mesh_.surfaces.size()) return;
+    mixedLed_.resize(mesh_.surfaces.size(), 0);
+    mixedLed_[surface] = led ? 1 : 0;
+    placeLedLayers();
+}
+
+// After surfaces change between Projection and LED, UV01 layers whose file names
+// a surface move onto it, and files waiting for a surface are tried again.
+void App::placeLedLayers() {
+    for (Layer& layer : layers_) {
+        if (layer.channel != 0 || layer.surface >= 0) continue;
+        const int surface = matchSurface(layer.image.name);
+        if (isLedSurface(surface)) layer.surface = surface;
     }
+    retryPending();
 }
 
 void App::showTestGrid(int channel) {
@@ -130,13 +193,14 @@ void App::showTestGrid(int channel) {
     view_.mode = ViewMode::TestGrid;
 }
 
-// The mapping's canvas is set by the largest file on it. In LED mode UV01 has
-// one canvas per surface.
+// The mapping's canvas is set by the largest file on it. UV01 on an LED surface
+// has one canvas per surface; projection surfaces share the rest.
 void App::canvasSize(int channel, int surface, int& width, int& height) const {
     width = height = 0;
-    const bool perSurface = needsSurface(channel);
+    const bool own = perSurface(channel, surface);
     for (const Layer& layer : layers_) {
-        if (layer.channel != channel || (perSurface && layer.surface != surface)) continue;
+        if (layer.channel != channel) continue;
+        if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
         if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
             width = layer.image.width;
             height = layer.image.height;
@@ -147,7 +211,7 @@ void App::canvasSize(int channel, int surface, int& width, int& height) const {
 std::vector<std::string> App::layerWarnings(const Layer& layer) const {
     std::vector<std::string> warnings;
     if (!channelUsable(layer.channel)) warnings.push_back(channelLabel(layer.channel) + " is ignored");
-    if (needsSurface(layer.channel) && layer.surface < 0) warnings.push_back("UV01 in LED mode needs a surface");
+    if (needsSurface(layer.channel) && layer.surface < 0) warnings.push_back("UV01 on LED surfaces needs a surface");
 
     int width = 0, height = 0;
     canvasSize(layer.channel, layer.surface, width, height);
@@ -177,6 +241,7 @@ void App::openMesh(const std::string& path) {
 
     mesh_ = std::move(loaded);
     channels_.assign(mesh_.channels.size(), ChannelState{});
+    mixedLed_.assign(mesh_.surfaces.size(), 0);
     renderer_.uploadMesh(mesh_);
     scale_ = 1.0f;
     camera_.frame(mesh_.boundsMin, mesh_.boundsMax);
@@ -246,8 +311,8 @@ void App::importImage(const std::string& path) {
     else if (tag < 0) reason = "No UV tag in the name";
     else if (channel < 0 || channel >= (int)channels_.size()) reason = "UV" + std::to_string(tag) + " is not on this mesh";
     else if (channels_[channel].ignored) reason = channelLabel(channel) + " is ignored";
-    else if (needsSurface(channel) && (surface = matchSurface(name)) < 0)
-        reason = "No surface name found in the file name (UV01 is per surface in LED mode)";
+    else if (channel == 0 && anyLedSurface() && (surface = matchSurface(name)) < 0 && needsSurface(channel))
+        reason = "No surface name found in the file name (UV01 is per surface on LED surfaces)";
 
     pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
                                   [&](const PendingFile& p) { return p.path == path; }),
@@ -274,9 +339,7 @@ bool App::addLayer(const std::string& path, int channel, int surface) {
     layers_.push_back(layer);
     selectedLayer_ = layer.id;
 
-    std::string placement = channelLabel(channel);
-    if (surface >= 0) placement += ", " + surfaceLabel(surface);
-    log(layer.image.name + " -> " + placement + " (" + sizeText(layer.image.width, layer.image.height) + ")");
+    log(layer.image.name + " -> " + placementLabel(channel, surface) + " (" + sizeText(layer.image.width, layer.image.height) + ")");
     if (layers_.size() == (size_t)kMaxLayers + 1)
         log("Warning: more than " + std::to_string(kMaxLayers) + " visible layers; only the top " +
             std::to_string(kMaxLayers) + " are drawn.");
@@ -362,6 +425,9 @@ void App::drawMeshSection() {
     if (ImGui::RadioButton("LED", mode_ == MappingMode::Led)) setMode(MappingMode::Led);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("LED: UV01 is per surface, like feed mapping. UV02 and up stay shared layouts.");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Mixed", mode_ == MappingMode::Mixed)) setMode(MappingMode::Mixed);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mixed: choose Projection or LED for each surface.");
 
     if (mesh_.empty()) return;
 
@@ -389,11 +455,52 @@ void App::drawMeshSection() {
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset")) scale_ = 1.0f;
 
-    if (mesh_.surfaces.size() > 1 && ImGui::TreeNode("Surfaces")) {
-        for (const Surface& surface : mesh_.surfaces)
-            ImGui::BulletText("%s (%u triangles)", surface.name.c_str(), surface.vertexCount / 3);
-        ImGui::TreePop();
+    drawSurfaceSection();
+}
+
+// Lists the surfaces with their type and, for LED surfaces, the size of their own UV01 canvas.
+void App::drawSurfaceSection() {
+    const bool open = ImGui::TreeNodeEx("Surfaces", mode_ != MappingMode::Projection ? ImGuiTreeNodeFlags_DefaultOpen : 0,
+                                        "Surfaces (%d)", (int)mesh_.surfaces.size());
+    if (!open) return;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit;
+    if (ImGui::BeginTable("surfaces", 3, flags)) {
+        ImGui::TableSetupColumn("Surface", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Type");
+        ImGui::TableSetupColumn("UV01 mapping");
+        ImGui::TableHeadersRow();
+        for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) {
+            const Surface& surface = mesh_.surfaces[s];
+            ImGui::PushID(s);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(surface.name.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%u triangles", surface.vertexCount / 3);
+
+            ImGui::TableNextColumn();
+            const bool led = isLedSurface(s);
+            if (mode_ == MappingMode::Mixed) {
+                if (ImGui::RadioButton("Proj.", !led)) setSurfaceLed(s, false);
+                ImGui::SameLine();
+                if (ImGui::RadioButton("LED", led)) setSurfaceLed(s, true);
+            } else {
+                ImGui::TextUnformatted(led ? "LED" : "Projection");
+            }
+
+            ImGui::TableNextColumn();
+            if (led) {
+                int width = 0, height = 0;
+                canvasSize(0, s, width, height);
+                if (width > 0) ImGui::Text("%s", sizeText(width, height).c_str());
+                else ImGui::TextColored(kMutedColor, "No media");
+            } else {
+                ImGui::TextColored(kMutedColor, "Shared");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
     }
+    ImGui::TreePop();
 }
 
 void App::drawChannelSection() {
@@ -454,8 +561,11 @@ void App::drawChannelSection() {
             ImGui::TextColored(kMutedColor, "Ignored");
             ImGui::SameLine();
             if (ImGui::SmallButton("Restore")) state.ignored = false;
-        } else if (needsSurface((int)c)) {
-            ImGui::Text("Per surface");
+        } else if (c == 0 && anyLedSurface()) {
+            int width = 0, height = 0;
+            if (anyProjectionSurface()) canvasSize(0, -1, width, height);
+            if (width > 0) ImGui::Text("Shared %s", sizeText(width, height).c_str());
+            ImGui::Text("Per LED surface, see Surfaces");
             ImGui::TextColored(kMutedColor, "%d layer(s)", layerCount);
         } else {
             int width = 0, height = 0;
@@ -551,8 +661,7 @@ void App::drawLayerList() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show or hide this layer");
         ImGui::SameLine();
 
-        std::string label = layer.image.name + "\n" + channelLabel(layer.channel);
-        if (layer.surface >= 0) label += " · " + surfaceLabel(layer.surface);
+        std::string label = layer.image.name + "\n" + placementLabel(layer.channel, layer.surface);
         char detail[64];
         std::snprintf(detail, sizeof(detail), " · %s · %.0f%%", blendModeName(layer.blend), layer.opacity * 100.0f);
         label += detail;
@@ -728,7 +837,9 @@ void App::drawViewport() {
         RenderLayer render;
         render.texture = layer.image.texture;
         render.channel = layer.channel;
-        render.surface = layer.surface;
+        render.surface = layer.surface >= 0 ? layer.surface
+                         : layer.channel == 0 ? kProjectionSurfaces
+                                              : kAllSurfaces;
         render.blend = layer.blend;
         render.opacity = layer.opacity;
         render.clamp = channels_[layer.channel].clamp;
@@ -740,6 +851,8 @@ void App::drawViewport() {
     view_.gridChannel = gridChannel_;
     view_.gridClamp = channelUsable(gridChannel_) ? channels_[gridChannel_].clamp : true;
     view_.scale = scale_;
+    view_.ledSurfaces.assign(mesh_.surfaces.size(), 0);
+    for (int s = 0; s < (int)mesh_.surfaces.size(); ++s) view_.ledSurfaces[s] = isLedSurface(s);
     renderer_.render(width, height, camera_, view_);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();

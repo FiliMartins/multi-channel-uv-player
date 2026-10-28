@@ -48,6 +48,7 @@ uniform int uLayerBlend[MAX_LAYERS];
 uniform float uLayerOpacity[MAX_LAYERS];
 uniform bool uLayerClamp[MAX_LAYERS];
 uniform sampler2D uTexture[MAX_LAYERS];
+uniform sampler2D uLedSurfaces;  // one texel per surface, red = 1 for LED surfaces
 out vec4 fragColor;
 
 vec3 color = vec3(0.0);   // accumulated layer colour
@@ -89,6 +90,7 @@ vec4 sampleLayer(sampler2D tex, vec2 uv, bool clampUv) {
 void applyLayer(int i, vec2 uv, vec4 texel) {
     float visible = uLayerClamp[i] && !insideUnitSquare(uv) ? 0.0 : 1.0;
     if (uLayerSurface[i] >= 0 && uLayerSurface[i] != vSurface) visible = 0.0;
+    if (uLayerSurface[i] == -2 && texelFetch(uLedSurfaces, ivec2(vSurface, 0), 0).r > 0.5) visible = 0.0;
     float amount = visible * uLayerOpacity[i];
     float weight = amount * texel.a;
     int blend = uLayerBlend[i];
@@ -350,6 +352,7 @@ void Renderer::shutdown() {
     glDeleteBuffers(1, &gridVbo_);
     glDeleteFramebuffers(1, &framebuffer_);
     glDeleteTextures(1, &colorTexture_);
+    glDeleteTextures(1, &ledTexture_);
     glDeleteRenderbuffers(1, &depthBuffer_);
 }
 
@@ -379,6 +382,21 @@ void Renderer::resizeTarget(int width, int height) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture_, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthBuffer_);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::uploadLedSurfaces(const std::vector<unsigned char>& flags) {
+    if (ledValid_ && flags == ledUploaded_) return;
+    if (!ledTexture_) glGenTextures(1, &ledTexture_);
+    std::vector<unsigned char> texels(std::max<size_t>(flags.size(), 1), 0);
+    for (size_t i = 0; i < flags.size(); ++i) texels[i] = flags[i] ? 255 : 0;
+    glBindTexture(GL_TEXTURE_2D, ledTexture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (int)texels.size(), 1, 0, GL_RED, GL_UNSIGNED_BYTE, texels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    ledUploaded_ = flags;
+    ledValid_ = true;
 }
 
 void Renderer::render(int width, int height, const OrbitCamera& camera, const ViewSettings& view) {
@@ -429,6 +447,10 @@ void Renderer::render(int width, int height, const OrbitCamera& camera, const Vi
             clampUv[i] = layer.clamp;
             opacity[i] = layer.opacity;
         }
+        uploadLedSurfaces(view.ledSurfaces);
+        glActiveTexture(GL_TEXTURE0 + kMaxLayers);
+        glBindTexture(GL_TEXTURE_2D, ledTexture_);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uLedSurfaces"), kMaxLayers);
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(glGetUniformLocation(meshProgram_, "uLayerCount"), layerCount);
         glUniform1iv(glGetUniformLocation(meshProgram_, "uLayerChannel"), kMaxLayers, channel);

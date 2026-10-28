@@ -10,6 +10,11 @@
 #include "media.h"
 #include "mesh.h"
 #include "renderer.h"
+#include "video.h"
+
+#include <array>
+#include <functional>
+#include <memory>
 
 // Projection: every UV channel is a layout shared by the whole mesh.
 // LED: UV channel 1 is per surface (each surface fills its own 0-1, like feed
@@ -21,6 +26,19 @@ struct ChannelState {
     bool clamp = true;        // show content only inside the 0-1 UV square
     bool ignored = false;     // hidden by the user, e.g. a duplicate channel
     bool duplicateDecided = false;
+};
+
+// What a video layer shows after its last frame while the layer is still on.
+enum class VideoEnd { Loop, Hold, Hide };
+
+// Values that can be animated with keyframes: the layer's opacity and some
+// generator settings.
+enum class KeyParam { Opacity, Size, Angle, Trail, Density, Count };
+const char* keyParamName(KeyParam param);
+
+struct Keyframe {
+    double time = 0.0;  // seconds from the layer's in point, so keys move with the bar
+    float value = 0.0f;
 };
 
 // One entry of the global layer stack: a piece of media placed on a mapping.
@@ -39,6 +57,9 @@ struct Layer {
     double inTime = 0.0;   // seconds on the timeline where the layer starts
     double outTime = 0.0;  // and where it ends
     bool missing = false;  // the file was not found when the project opened
+    std::shared_ptr<Video> video;  // set for video files; image.texture shows its current frame
+    VideoEnd videoEnd = VideoEnd::Loop;
+    std::array<std::vector<Keyframe>, (size_t)KeyParam::Count> keys;  // each sorted by time
 };
 
 // A file the player could not place by its name; the user picks where it goes.
@@ -86,11 +107,26 @@ public:
     void showDistortion(bool stretch);
     void setTimelineLength(double seconds);
     void setTime(double seconds);
+    void setPlaying(bool playing) { playing_ = playing; }
+    // Waits up to `seconds` until every visible video shows its frame for the playhead.
+    void waitForVideos(double seconds);
 
 private:
     void importFolder(const std::string& folder);
     void importImage(const std::string& path);
     bool addLayer(const std::string& path, int channel, int surface);
+    // Loads an image or video into a layer's media; false with `error` set on failure.
+    bool loadMedia(const std::string& path, Layer& layer, std::string& error);
+    void freeMedia(Layer& layer);
+    void updateVideos();
+    void drawVideoInfo(Layer& layer);
+    void drawPerformance();
+    void applyKeyframes();
+    static float* keyTarget(Layer& layer, KeyParam param);
+    // A diamond after a value: adds or removes a key at the playhead.
+    void keyButton(Layer& layer, KeyParam param);
+    // After a value was edited: updates its key at the playhead if it is animated.
+    void keyEdited(Layer& layer, KeyParam param);
     void removeLayer(int index);
     void moveLayer(int from, int to);
     void retryPending();
@@ -147,6 +183,8 @@ private:
     void clearProject();
     bool isDirty() const;
     void drawTimeline();
+    void drawKeyDiamonds(Layer& layer, float y, float rowHeight, const std::function<float(double)>& timeToX,
+                         const std::function<double(float)>& xToTime);
     void drawTransport();
     void advanceTime();
     bool layerActive(const Layer& layer) const;
@@ -191,6 +229,8 @@ private:
     int dragLayer_ = -1;    // layer id being dragged on the timeline
     int dragPart_ = 0;      // 1 start edge, 2 body, 3 end edge, 4 playhead
     double dragOffset_ = 0.0;
+    int dragKeyLayer_ = -1;    // layer id whose keyframes are being dragged
+    double dragKeyTime_ = 0.0; // their current time
 
     // UV view
     bool showUvView_ = true;

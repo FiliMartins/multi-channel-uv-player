@@ -12,8 +12,10 @@
 // tiles) on UV channel N, optionally surface S; --distortion shows a distortion view.
 // --save writes the project to a .mcuv file after everything else is set up; a .mcuv
 // given as an input opens it. --relink FOLDER relinks missing media from a folder.
+// --play starts playback; --frames N takes the screenshot after N frames instead of 5.
 // --screenshot renders a few frames, saves the window to a PNG and exits (used for testing).
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -132,6 +134,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> generators;
     std::string distortion;
     std::string savePath, relinkFolder;
+    bool play = false;
+    int screenshotFrame = 5;
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -149,6 +153,8 @@ int main(int argc, char** argv) {
         else if (arg == "--distortion" && hasValue) distortion = args[++i];
         else if (arg == "--save" && hasValue) savePath = args[++i];
         else if (arg == "--relink" && hasValue) relinkFolder = args[++i];
+        else if (arg == "--play") play = true;
+        else if (arg == "--frames" && hasValue) screenshotFrame = std::max(1, std::atoi(args[++i].c_str()));
         else if (arg == "--mixed" && hasValue) {
             mixed = true;
             for (const char* p = args[++i].c_str(); *p;) {
@@ -233,6 +239,7 @@ int main(int argc, char** argv) {
     if (gridChannel > 0) app.showTestGrid(gridChannel - 1);
     if (wireframe) app.setWireframe(true);
     if (!savePath.empty()) app.saveProject(savePath);
+    if (play) app.setPlaying(true);
 
     int frameCount = 0;
     std::string windowTitle;
@@ -257,7 +264,7 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        if (!screenshotPath.empty() && ++frameCount == 5) {
+        if (!screenshotPath.empty() && ++frameCount == screenshotFrame) {
             const bool saved = saveScreenshot(window, screenshotPath);
             std::fprintf(stderr, saved ? "Saved %s\n" : "Could not save %s\n", screenshotPath.c_str());
             glfwSetWindowShouldClose(window, GLFW_TRUE);

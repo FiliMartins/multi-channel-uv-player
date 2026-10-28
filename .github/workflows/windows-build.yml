@@ -12,9 +12,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Fetch FFmpeg
+        # LGPL shared build from BtbN/FFmpeg-Builds: the 7.1 release line, or the
+        # newest numbered release line if 7.1 is no longer published.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = gh release view latest -R BtbN/FFmpeg-Builds --json assets --jq '.assets[].name'
+          $name = $assets | Where-Object { $_ -match '^ffmpeg-n7\.1-latest-win64-lgpl-shared-7\.1\.zip$' } | Select-Object -First 1
+          if (-not $name) {
+            $name = $assets | Where-Object { $_ -match '^ffmpeg-n\d+\.\d+-latest-win64-lgpl-shared-\d+\.\d+\.zip$' } | Sort-Object | Select-Object -Last 1
+          }
+          if (-not $name) { throw "No LGPL shared FFmpeg build found" }
+          Write-Host "Using $name"
+          gh release download latest -R BtbN/FFmpeg-Builds -p $name -D ffmpeg-download
+          Expand-Archive "ffmpeg-download/$name" -DestinationPath ffmpeg-download
+          $root = (Get-ChildItem ffmpeg-download -Directory | Select-Object -First 1).FullName
+          "FFMPEG_ROOT=$root" >> $env:GITHUB_ENV
+
       - name: Configure
         # Let CMake pick the newest Visual Studio on the runner.
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -A x64 "-DFFMPEG_ROOT=$env:FFMPEG_ROOT"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -27,6 +46,9 @@ jobs:
           Copy-Item README.md package/
           Copy-Item LICENSE.md package/
           Copy-Item THIRD_PARTY_NOTICES.md package/
+          # FFmpeg's DLLs sit next to the exe (LGPL: they stay replaceable).
+          Copy-Item "$env:FFMPEG_ROOT/bin/*.dll" package/
+          Copy-Item "$env:FFMPEG_ROOT/LICENSE.txt" package/FFMPEG_LICENSE.txt -ErrorAction SilentlyContinue
 
       - name: Upload
         uses: actions/upload-artifact@v5

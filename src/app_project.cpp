@@ -214,7 +214,14 @@ std::string App::serializeProject(bool forChangeCheck) const {
     project["uvView"] = uv;
 
     json layers = json::array();
-    for (const Layer& layer : layers_) {
+    for (const Layer& current : layers_) {
+        // Animated values change with the playhead; store their first key instead,
+        // so moving the playhead is not an unsaved change.
+        Layer layer = current;
+        for (int p = 0; p < (int)KeyParam::Count; ++p) {
+            float* target = keyTarget(layer, (KeyParam)p);
+            if (target && !layer.keys[p].empty()) *target = layer.keys[p].front().value;
+        }
         json entry = {{"name", layer.image.name},
                       {"channel", layer.channel},
                       {"blend", blendModeName(layer.blend)},
@@ -234,7 +241,19 @@ std::string App::serializeProject(bool forChangeCheck) const {
             entry["relative"] = relativeTo(layer.image.path, projectPath_);
             entry["width"] = layer.image.width;
             entry["height"] = layer.image.height;
+            if (layer.video || isVideoFile(layer.image.path)) {
+                const char* ends[] = {"loop", "hold", "hide"};
+                entry["videoEnd"] = ends[(int)layer.videoEnd];
+            }
         }
+        json keys = json::object();
+        for (int p = 0; p < (int)KeyParam::Count; ++p) {
+            if (layer.keys[p].empty()) continue;
+            json track = json::array();
+            for (const Keyframe& key : layer.keys[p]) track.push_back({key.time, key.value});
+            keys[keyParamName((KeyParam)p)] = track;
+        }
+        if (!keys.empty()) entry["keys"] = keys;
         layers.push_back(entry);
     }
     project["layers"] = layers;
@@ -382,8 +401,11 @@ bool App::openProject(const std::string& path, const std::string& searchFolder) 
             const std::string saved = read<std::string>(entry, "path", "");
             const std::string found = locate(saved, read<std::string>(entry, "relative", ""), path, searchIndex);
             std::string error;
-            if (found.empty() || !loadImage(found, maxTextureSize_, layer.image, error)) {
+            const std::string end = read<std::string>(entry, "videoEnd", "loop");
+            layer.videoEnd = end == "hold" ? VideoEnd::Hold : end == "hide" ? VideoEnd::Hide : VideoEnd::Loop;
+            if (found.empty() || !loadMedia(found, layer, error)) {
                 layer.missing = true;
+                layer.video.reset();
                 layer.image = Image{};
                 layer.image.path = saved;
                 layer.image.name = read<std::string>(entry, "name", fileNameOf(saved));
@@ -392,6 +414,16 @@ bool App::openProject(const std::string& path, const std::string& searchFolder) 
                 if (!error.empty()) log(layer.image.name + ": " + error);
                 ++missing;
             }
+        }
+        const json keys = entry.value("keys", json::object());
+        for (int p = 0; p < (int)KeyParam::Count; ++p) {
+            const auto track = keys.find(keyParamName((KeyParam)p));
+            if (track == keys.end() || !track->is_array()) continue;
+            for (const json& key : *track)
+                if (key.is_array() && key.size() == 2 && key[0].is_number() && key[1].is_number())
+                    layer.keys[p].push_back({key[0].get<double>(), key[1].get<float>()});
+            std::sort(layer.keys[p].begin(), layer.keys[p].end(),
+                      [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
         }
         layers_.push_back(layer);
     }
@@ -412,10 +444,11 @@ void App::relinkMissing(const std::string& folder) {
     for (Layer& layer : layers_) {
         if (!layer.missing) continue;
         const auto it = index.find(lowerText(layer.image.name));
-        Image image;
+        Layer loaded;
         std::string error;
-        if (it != index.end() && loadImage(it->second, maxTextureSize_, image, error)) {
-            layer.image = image;
+        if (it != index.end() && loadMedia(it->second, loaded, error)) {
+            layer.image = loaded.image;
+            layer.video = loaded.video;
             layer.missing = false;
             ++found;
         } else {

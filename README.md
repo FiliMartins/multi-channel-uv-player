@@ -2,7 +2,7 @@
 
 A Windows desktop player that maps content onto the UV channels of an FBX mesh and shows the result in a 3D view, in the spirit of a media server's stage view and timeline. The full concept lives in the project's concept doc.
 
-Current state: **milestone 3, UV view and output preview**.
+Current state: **milestone 4, timeline**.
 
 ## Getting a build
 
@@ -22,6 +22,7 @@ Every push builds a Windows version automatically. On GitHub, open **Actions →
 - **3D view:** shows the layers, the bare mesh, or a coloured test grid on any channel. Wireframe and floor grid toggles.
 - **UV view:** a 2D view beside the 3D view (toggle with *UV view*) that shows the mesh unwrapped into one UV channel's 0-1 square, at that mapping's pixel size. *Output (all layers)* shows every layer combined as that layout would receive it, for example the LED processor map on UV02; *This mapping only* shows just the layers placed on that channel. On UV01 with LED surfaces, pick one surface to see its own feed. Zoom in past 100% to see the exact output pixels; the pixel and UV under the cursor are shown. An optional UV wireframe shows the layout.
 - **Export PNG:** saves the UV view's output (without the wireframe) at the mapping's full size.
+- **Timeline:** set the length (seconds) and frame rate (24, 25, 30, 50 or 60). Play, pause, stop, go to start and loop, with an hours:minutes:seconds:frames readout. Click or drag on the ruler to scrub. Each layer has a bar with in and out points: drag the bar to move it, or its edges to trim; everything snaps to frames. A layer shows only between its in and out points, in both the 3D and UV views. In and out can also be typed or set to the playhead in the layer's settings. When the length changes, bars that ran to the end keep running to the new end.
 - **Drag and drop** FBX files, images or folders onto the window.
 
 Supported images: PNG, JPG, TGA, BMP. Images larger than the GPU's texture limit (shown in the log) are refused with a message.
@@ -35,15 +36,18 @@ Supported images: PNG, JPG, TGA, BMP. Images larger than the GPU's texture limit
 | Zoom | Mouse wheel |
 | Frame the mesh | F, or the Frame button |
 | UV view: zoom / pan | Mouse wheel / drag |
+| Play / pause | Space, or the Play button |
+| Scrub | Click or drag on the timeline ruler |
+| Move / trim a layer | Drag its timeline bar / the bar's edges |
 
 ## Command line
 
 ```
 MultiChannelUVPlayer.exe [mesh.fbx] [images or folders...] [--led | --mixed N,N...] [--grid N] [--wireframe]
-                         [--uv N[:S]] [--export out.png]
+                         [--uv N[:S]] [--export out.png] [--length S] [--time S]
 ```
 
-`--led` starts in LED mode. `--mixed 1,3` starts in Mixed mode with surfaces 1 and 3 set to LED. `--grid N` shows the test grid on UV channel N. `--uv 2` shows UV02 in the UV view (`--uv 1:3` shows UV01 of surface 3), and `--export out.png` saves that output. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
+`--led` starts in LED mode. `--mixed 1,3` starts in Mixed mode with surfaces 1 and 3 set to LED. `--grid N` shows the test grid on UV channel N. `--uv 2` shows UV02 in the UV view (`--uv 1:3` shows UV01 of surface 3), and `--export out.png` saves that output. `--length 20` sets the timeline to 20 seconds and `--time 5` puts the playhead at 5 seconds. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
 
 ## Building from source
 

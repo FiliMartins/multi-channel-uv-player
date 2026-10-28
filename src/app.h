@@ -28,6 +28,8 @@ struct Layer {
     BlendMode blend = BlendMode::Normal;
     float opacity = 1.0f;
     bool visible = true;
+    double inTime = 0.0;   // seconds on the timeline where the layer starts
+    double outTime = 0.0;  // and where it ends
 };
 
 // A file the player could not place by its name; the user picks where it goes.
@@ -57,6 +59,8 @@ public:
     void showUvView(int channel, int surface);
     // Renders the UV view's output at full size and saves it; returns false on failure.
     bool exportOutputPng(const std::string& path);
+    void setTimelineLength(double seconds);
+    void setTime(double seconds);
 
 private:
     void importFolder(const std::string& folder);
@@ -101,6 +105,12 @@ private:
     std::vector<unsigned char> ledFlags() const;
     void renderOutput(bool wireframe, int& width, int& height, std::string& note);
     void drawLog();
+    void drawTimeline();
+    void drawTransport();
+    void advanceTime();
+    bool layerActive(const Layer& layer) const;
+    double snapToFrame(double seconds) const;
+    std::string timecode(double seconds) const;
 
     Mesh mesh_;
     MappingMode mode_ = MappingMode::Projection;
@@ -118,6 +128,16 @@ private:
     int nextLayerId_ = 1;
     int maxTextureSize_ = 4096;
     bool layoutBuilt_ = false;
+
+    // Timeline
+    double length_ = 60.0;  // seconds
+    int fps_ = 30;
+    double time_ = 0.0;     // playhead, seconds
+    bool playing_ = false;
+    bool loop_ = true;
+    int dragLayer_ = -1;    // layer id being dragged on the timeline
+    int dragPart_ = 0;      // 1 start edge, 2 body, 3 end edge, 4 playhead
+    double dragOffset_ = 0.0;
 
     // UV view
     bool showUvView_ = true;

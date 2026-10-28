@@ -37,7 +37,8 @@ std::string openFileDialog(FileKind kind) {
     ofn.lpstrFilter = kind == FileKind::Fbx ? L"FBX mesh (*.fbx)\0*.fbx\0All files\0*.*\0"
                       : kind == FileKind::Project
                           ? L"Player project (*.mcuv)\0*.mcuv\0All files\0*.*\0"
-                          : L"Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All files\0*.*\0";
+                          : L"Images and videos\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.mov;*.mp4;*.m4v;*.avi;*.mkv;*.mxf\0"
+                            L"All files\0*.*\0";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) return {};
     return toUtf8(buffer);

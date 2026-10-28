@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <system_error>
 
 #include <imgui.h>
@@ -86,7 +87,12 @@ bool App::init(int maxTextureSize) {
 }
 
 void App::shutdown() {
+    for (const Layer& layer : layers_)
+        if (layer.video)
+            std::fprintf(stderr, "%s: decode %.2f ms per frame, %d dropped\n", layer.image.name.c_str(),
+                         layer.video->decodeMilliseconds(), layer.video->droppedFrames());
     for (int i = (int)layers_.size() - 1; i >= 0; --i) removeLayer(i);
+    Video::shutdownGl();
     generators_.shutdown();
     renderer_.shutdown();
 }
@@ -234,6 +240,12 @@ void App::fileCanvasSize(int channel, int surface, int& width, int& height) cons
 
 std::vector<std::string> App::layerWarnings(const Layer& layer) const {
     std::vector<std::string> warnings;
+    if (layer.video && std::fabs(layer.video->info().fps - fps_) > 0.01) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "Video runs at %.3g fps, the timeline at %d fps: frames are %s", layer.video->info().fps,
+                      fps_, layer.video->info().fps > fps_ ? "skipped" : "repeated");
+        warnings.push_back(text);
+    }
     if (layer.missing) warnings.push_back("File not found: " + layer.image.path);
     if (!channelUsable(layer.channel)) warnings.push_back(channelLabel(layer.channel) + " is ignored");
     if (needsSurface(layer.channel) && layer.surface < 0) warnings.push_back("UV01 on LED surfaces needs a surface");
@@ -300,10 +312,10 @@ void App::importPath(const std::string& path) {
         requestOpenProject(path);
     } else if (lowerExtension(path) == ".fbx") {
         openMesh(path);
-    } else if (isImageFile(path)) {
+    } else if (isImageFile(path) || isVideoFile(path)) {
         importImage(path);
     } else {
-        log("Skipped " + fileNameOf(path) + ": not a project, FBX, image or folder.");
+        log("Skipped " + fileNameOf(path) + ": not a project, FBX, image, video or folder.");
     }
 }
 
@@ -314,7 +326,7 @@ void App::importFolder(const std::string& folder) {
         if (!entry.is_regular_file(ec)) continue;
         const std::string path = utf8String(entry.path());
         if (lowerExtension(path) == ".fbx") meshes.push_back(path);
-        else if (isImageFile(path)) images.push_back(path);
+        else if (isImageFile(path) || isVideoFile(path)) images.push_back(path);
     }
     if (ec) {
         log("Could not read folder " + folder + ": " + ec.message());
@@ -323,7 +335,7 @@ void App::importFolder(const std::string& folder) {
     std::sort(meshes.begin(), meshes.end());
     std::sort(images.begin(), images.end());
 
-    log("Importing folder " + fileNameOf(folder) + ": " + std::to_string(images.size()) + " image(s).");
+    log("Importing folder " + fileNameOf(folder) + ": " + std::to_string(images.size()) + " image(s) and video(s).");
     if (mesh_.empty() && !meshes.empty()) openMesh(meshes.front());
     for (const std::string& image : images) importImage(image);
 }
@@ -356,7 +368,7 @@ void App::importImage(const std::string& path) {
 bool App::addLayer(const std::string& path, int channel, int surface) {
     Layer layer;
     std::string error;
-    if (!loadImage(path, maxTextureSize_, layer.image, error)) {
+    if (!loadMedia(path, layer, error)) {
         log(fileNameOf(path) + ": " + error);
         return false;
     }
@@ -368,7 +380,14 @@ bool App::addLayer(const std::string& path, int channel, int surface) {
     layers_.push_back(layer);
     selectedLayer_ = layer.id;
 
-    log(layer.image.name + " -> " + placementLabel(channel, surface) + " (" + sizeText(layer.image.width, layer.image.height) + ")");
+    std::string detail = sizeText(layer.image.width, layer.image.height);
+    if (layer.video) {
+        char text[96];
+        std::snprintf(text, sizeof(text), ", %s, %.3g fps, %.2f s", layer.video->info().codec.c_str(),
+                      layer.video->info().fps, layer.video->info().duration);
+        detail += text;
+    }
+    log(layer.image.name + " -> " + placementLabel(channel, surface) + " (" + detail + ")");
     if (layers_.size() == (size_t)kMaxLayers + 1)
         log("Warning: more than " + std::to_string(kMaxLayers) + " visible layers; only the top " +
             std::to_string(kMaxLayers) + " are drawn.");
@@ -381,7 +400,7 @@ void App::removeLayer(int index) {
         Generators::release(layer.target);
         layer.image = Image{};
     } else {
-        freeImage(layer.image);
+        freeMedia(layer);
     }
     layers_.erase(layers_.begin() + index);
 }
@@ -426,6 +445,8 @@ void App::frame() {
     }
 
     advanceTime();
+    applyKeyframes();
+    updateVideos();
     updateGenerators();
     drawProjectPanel();
     drawLayersPanel();
@@ -786,7 +807,13 @@ void App::drawLayerEditor(Layer& layer, int index) {
 
     ImGui::SetNextItemWidth(fieldWidth);
     float percent = layer.opacity * 100.0f;
-    if (ImGui::SliderFloat("Opacity", &percent, 0.0f, 100.0f, "%.0f%%")) layer.opacity = percent / 100.0f;
+    if (ImGui::SliderFloat("##opacity", &percent, 0.0f, 100.0f, "%.0f%%")) {
+        layer.opacity = percent / 100.0f;
+        keyEdited(layer, KeyParam::Opacity);
+    }
+    keyButton(layer, KeyParam::Opacity);
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Opacity");
 
     const double frame = 1.0 / fps_;
     ImGui::SetNextItemWidth(fieldWidth * 0.5f);
@@ -802,6 +829,7 @@ void App::drawLayerEditor(Layer& layer, int index) {
     ImGui::TextColored(kMutedColor, "On the timeline from %s to %s", timecode(layer.inTime).c_str(),
                        timecode(layer.outTime).c_str());
 
+    if (layer.video) drawVideoInfo(layer);
     if (layer.generated) drawGeneratorEditor(layer);
 
     for (const std::string& warning : layerWarnings(layer)) ImGui::TextColored(kWarningColor, "%s", warning.c_str());
@@ -810,15 +838,17 @@ void App::drawLayerEditor(Layer& layer, int index) {
     ImGui::SameLine();
     if (ImGui::Button("Down") && index > 0) moveLayer(index, index - 1);
     ImGui::SameLine();
-    if (!layer.generated && ImGui::Button("Replace image...")) {
+    if (!layer.generated && ImGui::Button("Replace file...")) {
         const std::string path = openFileDialog(FileKind::Image);
-        Image image;
+        Layer loaded;
         std::string error;
         if (!path.empty()) {
-            if (loadImage(path, maxTextureSize_, image, error)) {
+            if (loadMedia(path, loaded, error)) {
                 Layer& target = layers_[selectedIndex()];
-                freeImage(target.image);
-                target.image = image;
+                freeMedia(target);
+                target.image = loaded.image;
+                target.video = loaded.video;
+                target.missing = false;
             } else {
                 log(fileNameOf(path) + ": " + error);
             }
@@ -1070,6 +1100,8 @@ bool App::exportOutputPng(const std::string& path) {
         return false;
     }
     // Rendered without the wireframe overlay, so the PNG is the output itself.
+    applyKeyframes();
+    waitForVideos(5.0);
     updateGenerators();
     int width = 0, height = 0;
     std::string note;
@@ -1416,6 +1448,7 @@ void App::drawGeneratorEditor(Layer& layer) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leave the background empty so the layers below show through.");
 
     ImGui::SetNextItemWidth(fieldWidth);
+    // Speed has no keys: the patterns move by time x speed, so animating it would make them jump.
     ImGui::SliderFloat("Speed", &g.speed, 0.0f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
     const GeneratorType type = g.type;
     const char* sizeLabel = type == GeneratorType::Bugs ? "Bug size (px)"
@@ -1426,19 +1459,23 @@ void App::drawGeneratorEditor(Layer& layer) {
                                                            : "Grid (px)";
     if (type != GeneratorType::Gradient && type != GeneratorType::Tiles) {
         ImGui::SetNextItemWidth(fieldWidth);
-        ImGui::DragFloat(sizeLabel, &g.size, 0.5f, 1.0f, 2000.0f, "%.0f");
+        if (ImGui::DragFloat(sizeLabel, &g.size, 0.5f, 1.0f, 2000.0f, "%.0f")) keyEdited(layer, KeyParam::Size);
+        keyButton(layer, KeyParam::Size);
     }
     if (type == GeneratorType::Bugs) {
         ImGui::SetNextItemWidth(fieldWidth);
-        ImGui::SliderFloat("Amount", &g.density, 0.0f, 1.0f, "%.2f");
+        if (ImGui::SliderFloat("Amount", &g.density, 0.0f, 1.0f, "%.2f")) keyEdited(layer, KeyParam::Density);
+        keyButton(layer, KeyParam::Density);
     }
     if (type == GeneratorType::Bugs || type == GeneratorType::Radar || type == GeneratorType::Scan) {
         ImGui::SetNextItemWidth(fieldWidth);
-        ImGui::SliderFloat("Trail", &g.trail, 0.0f, 1.0f, "%.2f");
+        if (ImGui::SliderFloat("Trail", &g.trail, 0.0f, 1.0f, "%.2f")) keyEdited(layer, KeyParam::Trail);
+        keyButton(layer, KeyParam::Trail);
     }
     if (type == GeneratorType::Chevron || type == GeneratorType::Scan || type == GeneratorType::Gradient) {
         ImGui::SetNextItemWidth(fieldWidth);
-        ImGui::SliderFloat("Direction", &g.angle, -180.0f, 180.0f, "%.0f deg");
+        if (ImGui::SliderFloat("Direction", &g.angle, -180.0f, 180.0f, "%.0f deg")) keyEdited(layer, KeyParam::Angle);
+        keyButton(layer, KeyParam::Angle);
     }
     if (type == GeneratorType::Radar) {
         ImGui::SetNextItemWidth(fieldWidth);
@@ -1482,6 +1519,8 @@ std::string App::timecode(double seconds) const {
 // that runs to the end of the timeline also shows on the last frame.
 bool App::layerActive(const Layer& layer) const {
     if (time_ < layer.inTime) return false;
+    if (layer.video && layer.videoEnd == VideoEnd::Hide && time_ - layer.inTime >= layer.video->info().duration)
+        return false;
     return time_ < layer.outTime || (layer.outTime >= length_ && time_ >= length_);
 }
 
@@ -1561,6 +1600,7 @@ void App::drawTransport() {
         }
         ImGui::EndCombo();
     }
+    drawPerformance();
 }
 
 void App::drawTimeline() {
@@ -1650,6 +1690,7 @@ void App::drawTimeline() {
                                 IM_COL32(30, 31, 36, 255));
         const float x0 = timeToX(layer.inTime), x1 = std::max(timeToX(layer.outTime), x0 + 2.0f);
         ImGui::SetCursorScreenPos(ImVec2(trackX, y));
+        ImGui::SetNextItemAllowOverlap();  // keyframe diamonds sit on top of the bar
         ImGui::InvisibleButton("track", ImVec2(trackWidth, rowHeight - 2));
         const bool hovered = ImGui::IsItemHovered();
         const float edge = 6.0f;
@@ -1693,6 +1734,7 @@ void App::drawTimeline() {
         drawList->PushClipRect(ImVec2(x0 + 4, y), ImVec2(x1 - 4, y + rowHeight), true);
         drawList->AddText(ImVec2(x0 + 6, y + 5), IM_COL32(255, 255, 255, 230), barText.c_str());
         drawList->PopClipRect();
+        drawKeyDiamonds(layer, y, rowHeight, timeToX, xToTime);
         ImGui::PopID();
         y += rowHeight;
     }
@@ -1711,6 +1753,74 @@ void App::drawTimeline() {
     ImGui::SetCursorScreenPos(ImVec2(origin.x, y));
     ImGui::Dummy(ImVec2(1, 1));
     ImGui::End();
+}
+
+// Keyframes of every animated value on a layer's bar: click to go to one, drag
+// to move it, right-click to delete it.
+void App::drawKeyDiamonds(Layer& layer, float y, float rowHeight, const std::function<float(double)>& timeToX,
+                          const std::function<double(float)>& xToTime) {
+    std::vector<double> times;
+    for (const std::vector<Keyframe>& keys : layer.keys)
+        for (const Keyframe& key : keys)
+            if (std::none_of(times.begin(), times.end(), [&](double t) { return std::fabs(t - key.time) < 0.5 / fps_; }))
+                times.push_back(key.time);
+    const ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const auto sameTime = [&](double a, double b) { return std::fabs(a - b) < 0.5 / fps_; };
+    for (size_t k = 0; k < times.size(); ++k) {
+        const double t = times[k];
+        const float x = timeToX(layer.inTime + t);
+        const float cy = y + rowHeight * 0.5f - 1.0f, r = 5.0f;
+        ImGui::PushID((int)k);
+        ImGui::SetCursorScreenPos(ImVec2(x - r - 1, y + 2));
+        ImGui::InvisibleButton("key", ImVec2(2 * r + 2, rowHeight - 6));
+        const bool hovered = ImGui::IsItemHovered();
+        if (ImGui::IsItemActivated()) {
+            selectedLayer_ = layer.id;
+            dragKeyLayer_ = layer.id;
+            dragKeyTime_ = t;
+        }
+        if (ImGui::IsItemActive() && dragKeyLayer_ == layer.id && sameTime(dragKeyTime_, t) &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const double moved = std::clamp(snapToFrame(xToTime(io.MousePos.x)) - layer.inTime, 0.0,
+                                            layer.outTime - layer.inTime);
+            for (std::vector<Keyframe>& keys : layer.keys) {
+                const bool occupied = std::any_of(keys.begin(), keys.end(), [&](const Keyframe& key) {
+                    return sameTime(key.time, moved) && !sameTime(key.time, t);
+                });
+                if (occupied) continue;  // never stack two keys of one value on a frame
+                for (Keyframe& key : keys)
+                    if (sameTime(key.time, t)) key.time = moved;
+                std::sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
+            }
+            dragKeyTime_ = moved;
+        }
+        if (ImGui::IsItemDeactivated() && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left))
+            time_ = std::clamp(layer.inTime + t, 0.0, length_);
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            for (std::vector<Keyframe>& keys : layer.keys)
+                keys.erase(std::remove_if(keys.begin(), keys.end(), [&](const Keyframe& key) { return sameTime(key.time, t); }),
+                           keys.end());
+        }
+        if (hovered) {
+            std::string names;
+            for (int p = 0; p < (int)KeyParam::Count; ++p)
+                for (const Keyframe& key : layer.keys[p])
+                    if (sameTime(key.time, t)) {
+                        char text[64];
+                        std::snprintf(text, sizeof(text), "%s%s %.3g", names.empty() ? "" : ", ",
+                                      keyParamName((KeyParam)p), p == 0 ? key.value * 100.0f : key.value);
+                        names += text;
+                        if (p == 0) names += "%";
+                    }
+            ImGui::SetTooltip("Key at %s: %s\nClick: go there. Drag: move. Right-click: delete.",
+                              timecode(layer.inTime + t).c_str(), names.c_str());
+        }
+        const ImVec2 points[4] = {ImVec2(x, cy - r), ImVec2(x + r, cy), ImVec2(x, cy + r), ImVec2(x - r, cy)};
+        drawList->AddConvexPolyFilled(points, 4, hovered ? IM_COL32(255, 215, 120, 255) : IM_COL32(245, 180, 60, 255));
+        drawList->AddPolyline(points, 4, IM_COL32(40, 30, 10, 255), ImDrawFlags_Closed, 1.0f);
+        ImGui::PopID();
+    }
 }
 
 void App::drawLog() {

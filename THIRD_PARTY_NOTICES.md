@@ -180,3 +180,9 @@ SOFTWARE.
 ## glad (OpenGL loader, generated)
 
 https://github.com/Dav1dde/glad - the generated loader in `third_party/glad` is under WTFPL or CC0-1.0, and the Khronos OpenGL API registry it is generated from is under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+## FFmpeg (libavformat, libavcodec, libavutil, libswscale)
+
+https://ffmpeg.org - license: GNU Lesser General Public License 2.1 or later (https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html).
+
+The Windows download ships FFmpeg as unmodified shared libraries (the DLLs next to the exe) from the LGPL builds of https://github.com/BtbN/FFmpeg-Builds, whose release pages link the exact FFmpeg source they were built from. The DLLs can be replaced with other compatible FFmpeg builds. FFmpeg's own license text is included as FFMPEG_LICENSE.txt.

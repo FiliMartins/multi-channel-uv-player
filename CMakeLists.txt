@@ -39,6 +39,26 @@ FetchContent_Declare(json
 # imgui, ufbx and stb are plain sources: SOURCE_SUBDIR none fetches them without add_subdirectory.
 FetchContent_MakeAvailable(glfw imgui ufbx stb json)
 
+# FFmpeg reads video files and decodes H.264 and NotchLC; HAP frames are only
+# demuxed by FFmpeg and decoded on the GPU. Windows uses a prebuilt LGPL shared
+# build (FFMPEG_ROOT, fetched by CI), other platforms the system's pkg-config.
+if(WIN32)
+    set(FFMPEG_ROOT "" CACHE PATH "Folder of a shared FFmpeg build with include, lib and bin")
+    if(NOT EXISTS "${FFMPEG_ROOT}/include/libavformat/avformat.h")
+        message(FATAL_ERROR "Set FFMPEG_ROOT to a shared FFmpeg build (see .github/workflows/windows-build.yml).")
+    endif()
+    add_library(ffmpeg INTERFACE)
+    target_include_directories(ffmpeg INTERFACE "${FFMPEG_ROOT}/include")
+    target_link_libraries(ffmpeg INTERFACE "${FFMPEG_ROOT}/lib/avformat.lib" "${FFMPEG_ROOT}/lib/avcodec.lib"
+                                           "${FFMPEG_ROOT}/lib/swscale.lib" "${FFMPEG_ROOT}/lib/avutil.lib")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libswscale libavutil)
+    add_library(ffmpeg INTERFACE)
+    target_link_libraries(ffmpeg INTERFACE PkgConfig::FFMPEG)
+endif()
+find_package(Threads REQUIRED)
+
 add_library(glad STATIC third_party/glad/src/gl.c)
 target_include_directories(glad PUBLIC third_party/glad/include)
 
@@ -59,8 +79,12 @@ add_executable(MultiChannelUVPlayer
     src/main.cpp
     src/app.cpp
     src/app_project.cpp
+    src/app_video.cpp
     src/mesh.cpp
     src/media.cpp
+    src/video.cpp
+    src/hap.cpp
+    src/snappy.cpp
     src/renderer.cpp
     src/gl_util.cpp
     src/generators.cpp
@@ -68,7 +92,7 @@ add_executable(MultiChannelUVPlayer
     src/file_dialog.cpp
     src/stb_impl.cpp)
 target_include_directories(MultiChannelUVPlayer PRIVATE src ${stb_SOURCE_DIR})
-target_link_libraries(MultiChannelUVPlayer PRIVATE glad imgui ufbx glfw nlohmann_json::nlohmann_json)
+target_link_libraries(MultiChannelUVPlayer PRIVATE glad imgui ufbx glfw nlohmann_json::nlohmann_json ffmpeg Threads::Threads)
 
 if(WIN32)
     target_compile_definitions(MultiChannelUVPlayer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)

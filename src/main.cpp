@@ -9,17 +9,19 @@
 #include <string>
 #include <vector>
 
+// windows.h comes before GLFW so its APIENTRY definition is the one used.
+#ifdef _WIN32
+#include <windows.h>
+#include <objbase.h>
+#include <shellapi.h>
+#endif
+
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <stb_image_write.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <shellapi.h>
-#endif
 
 #include "app.h"
 

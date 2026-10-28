@@ -3,12 +3,15 @@
 // Usage: MultiChannelUVPlayer [mesh.fbx] [images or folders...]
 //        [--led | --mixed N,N...] [--grid N] [--wireframe]
 //        [--uv N[:S]] [--export out.png] [--length S] [--time S]
-//        [--gen TYPE:N[:S]]... [--distortion density|stretch] [--size WxH] [--screenshot out.png]
+//        [--gen TYPE:N[:S]]... [--distortion density|stretch] [--size WxH]
+//        [--save project.mcuv] [--relink FOLDER] [--screenshot out.png]
 // --mixed sets Mixed mode with the listed surfaces (1-based) as LED.
 // --uv shows UV channel N in the UV view, optionally surface S (1-based); --export
 // saves that view's output as a PNG.
 // --gen adds a generator (testpattern, bugs, chevron, radar, scan, gradient, noise,
 // tiles) on UV channel N, optionally surface S; --distortion shows a distortion view.
+// --save writes the project to a .mcuv file after everything else is set up; a .mcuv
+// given as an input opens it. --relink FOLDER relinks missing media from a folder.
 // --screenshot renders a few frames, saves the window to a PNG and exits (used for testing).
 
 #include <cstdio>
@@ -37,6 +40,12 @@ namespace {
 void onDrop(GLFWwindow* window, int count, const char** paths) {
     App* app = static_cast<App*>(glfwGetWindowUserPointer(window));
     for (int i = 0; i < count; ++i) app->importPath(paths[i]);
+}
+
+// Closing the window asks about unsaved changes first.
+void onClose(GLFWwindow* window) {
+    App* app = static_cast<App*>(glfwGetWindowUserPointer(window));
+    if (!app->requestClose()) glfwSetWindowShouldClose(window, GLFW_FALSE);
 }
 
 void setupStyle() {
@@ -119,9 +128,10 @@ int main(int argc, char** argv) {
     bool mixed = false;
     int uvChannel = 0, uvSurface = 0;  // 1-based, 0 = default
     std::string exportPath;
-    double timelineLength = 0.0, startTime = 0.0;  // seconds, 0 = default
+    double timelineLength = 0.0, startTime = -1.0;  // seconds; 0 length and negative time = default
     std::vector<std::string> generators;
     std::string distortion;
+    std::string savePath, relinkFolder;
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -137,6 +147,8 @@ int main(int argc, char** argv) {
         else if (arg == "--time" && hasValue) startTime = std::atof(args[++i].c_str());
         else if (arg == "--gen" && hasValue) generators.push_back(args[++i]);
         else if (arg == "--distortion" && hasValue) distortion = args[++i];
+        else if (arg == "--save" && hasValue) savePath = args[++i];
+        else if (arg == "--relink" && hasValue) relinkFolder = args[++i];
         else if (arg == "--mixed" && hasValue) {
             mixed = true;
             for (const char* p = args[++i].c_str(); *p;) {
@@ -198,11 +210,13 @@ int main(int argc, char** argv) {
     }
     glfwSetWindowUserPointer(window, &app);
     glfwSetDropCallback(window, onDrop);
+    glfwSetWindowCloseCallback(window, onClose);
     if (led) app.setMode(MappingMode::Led);
     if (mixed) app.setMode(MappingMode::Mixed);
     if (timelineLength > 0.0) app.setTimelineLength(timelineLength);
     for (const std::string& input : inputs) app.importPath(input);
-    app.setTime(startTime);
+    if (!relinkFolder.empty()) app.relinkMissing(relinkFolder);
+    if (startTime >= 0.0) app.setTime(startTime);
     for (int surface : mixedLed) app.setSurfaceLed(surface - 1, true);
     if (uvChannel > 0) app.showUvView(uvChannel - 1, uvSurface > 0 ? uvSurface - 1 : kAllSurfaces);
     for (const std::string& spec : generators) {
@@ -218,10 +232,18 @@ int main(int argc, char** argv) {
     if (!exportPath.empty()) app.exportOutputPng(exportPath);
     if (gridChannel > 0) app.showTestGrid(gridChannel - 1);
     if (wireframe) app.setWireframe(true);
+    if (!savePath.empty()) app.saveProject(savePath);
 
     int frameCount = 0;
+    std::string windowTitle;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        if (app.quitConfirmed()) break;
+        const std::string title = app.windowTitle();
+        if (title != windowTitle) {
+            windowTitle = title;
+            glfwSetWindowTitle(window, windowTitle.c_str());
+        }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();

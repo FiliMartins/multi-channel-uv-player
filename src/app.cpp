@@ -81,6 +81,7 @@ bool App::init(int maxTextureSize) {
     maxTextureSize_ = maxTextureSize;
     if (!renderer_.init() || !generators_.init()) return false;
     log("GPU texture limit: " + std::to_string(maxTextureSize_) + " px per side.");
+    savedState_ = serializeProject(true);
     return true;
 }
 
@@ -233,6 +234,7 @@ void App::fileCanvasSize(int channel, int surface, int& width, int& height) cons
 
 std::vector<std::string> App::layerWarnings(const Layer& layer) const {
     std::vector<std::string> warnings;
+    if (layer.missing) warnings.push_back("File not found: " + layer.image.path);
     if (!channelUsable(layer.channel)) warnings.push_back(channelLabel(layer.channel) + " is ignored");
     if (needsSurface(layer.channel) && layer.surface < 0) warnings.push_back("UV01 on LED surfaces needs a surface");
 
@@ -294,12 +296,14 @@ void App::importPath(const std::string& path) {
     std::error_code ec;
     if (std::filesystem::is_directory(toPath(path), ec)) {
         importFolder(path);
+    } else if (lowerExtension(path) == ".mcuv") {
+        requestOpenProject(path);
     } else if (lowerExtension(path) == ".fbx") {
         openMesh(path);
     } else if (isImageFile(path)) {
         importImage(path);
     } else {
-        log("Skipped " + fileNameOf(path) + ": not an FBX, image or folder.");
+        log("Skipped " + fileNameOf(path) + ": not a project, FBX, image or folder.");
     }
 }
 
@@ -396,6 +400,8 @@ void App::retryPending() {
 }
 
 void App::frame() {
+    handleShortcuts();
+    drawMenuBar();
     ImGuiID dockspace = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
     if (!layoutBuilt_) {
         layoutBuilt_ = true;
@@ -427,10 +433,22 @@ void App::frame() {
     drawUvView();
     drawTimeline();
     drawLog();
+    drawProjectPrompts();
 }
 
 void App::drawProjectPanel() {
     ImGui::Begin(kProjectWindow);
+    ImGui::SeparatorText("Project file");
+    if (ImGui::Button("Open project...")) {
+        const std::string path = openFileDialog(FileKind::Project);
+        if (!path.empty()) requestOpenProject(path);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save project")) saveOrSaveAs();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Saves the mesh, layers, timeline and views to a .mcuv file. Media stays where it is;\n"
+                          "the project remembers where, and finds it again if the folder moves with the project.");
+    ImGui::Spacing();
     drawMeshSection();
     ImGui::Spacing();
     drawChannelSection();
@@ -695,6 +713,7 @@ void App::drawLayersPanel() {
     drawLayerList();
     const int index = selectedIndex();
     if (index >= 0) drawLayerEditor(layers_[index], index);
+    drawMissingSection();
     drawPendingSection();
     ImGui::End();
 }
@@ -719,7 +738,8 @@ void App::drawLayerList() {
         std::snprintf(detail, sizeof(detail), " · %s · %.0f%%", blendModeName(layer.blend), layer.opacity * 100.0f);
         label += detail;
         const bool warn = !layerWarnings(layer).empty();
-        if (warn) label += "  (!)";
+        if (layer.missing) label += "  (missing)";
+        else if (warn) label += "  (!)";
 
         if (!layer.visible) ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
         if (ImGui::Selectable(label.c_str(), selectedLayer_ == layer.id, 0, ImVec2(0, ImGui::GetTextLineHeight() * 2)))
@@ -1605,9 +1625,23 @@ void App::drawTimeline() {
         ImGui::PushID(layer.id);
         const bool selected = layer.id == selectedLayer_;
 
-        ImGui::SetCursorScreenPos(ImVec2(origin.x + 4, y));
+        // Mute toggle, like a mixer's M button: lit red while the layer is muted.
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + 4, y + 1));
+        const bool muted = !layer.visible;
+        if (muted) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.20f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.30f, 0.27f, 1.0f));
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+        if (ImGui::Button("M", ImVec2(rowHeight - 4, rowHeight - 4))) layer.visible = !layer.visible;
+        ImGui::PopStyleVar();
+        if (muted) ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(muted ? "Muted: click to show this layer" : "Mute this layer");
+
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + 4 + rowHeight, y));
         if (!layer.visible) ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
-        if (ImGui::Selectable(layer.image.name.c_str(), selected, 0, ImVec2(labelWidth - 12, rowHeight - 4)))
+        if (ImGui::Selectable(layer.image.name.c_str(), selected, 0,
+                              ImVec2(labelWidth - 12 - rowHeight, rowHeight - 4)))
             selectedLayer_ = layer.id;
         if (!layer.visible) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", placementLabel(layer.channel, layer.surface).c_str());

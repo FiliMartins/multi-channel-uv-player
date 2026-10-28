@@ -60,3 +60,9 @@ Needs CMake 3.24+ and a recent Visual Studio (or any C++20 compiler). Dependenci
 cmake -S . -B build
 cmake --build build --config Release
 ```
+
+## License
+
+Copyright (c) 2026 Filipe Martins. Free for personal, study, hobby and other noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). Commercial or professional use needs written permission from the author. The libraries the player is built with keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Changes are made only by the author. Suggestions are welcome as issues or pull requests, but nothing is merged without the author's review.

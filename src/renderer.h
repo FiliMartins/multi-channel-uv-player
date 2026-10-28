@@ -39,7 +39,17 @@ struct RenderLayer {
     bool clamp = true;        // hide content outside the 0-1 UV square
 };
 
-enum class ViewMode { Layers, MeshOnly, TestGrid };
+enum class ViewMode { Layers, MeshOnly, TestGrid, Distortion };
+
+// Colours the mesh by how one UV channel spreads an output's pixels over it.
+struct DistortionView {
+    int channel = 0;
+    bool stretch = false;            // false: pixel density against the mean; true: stretch
+    float resolution[2] = {1024, 1024};
+    float meanDensity = 1.0f;        // pixels per metre the density colours are measured against
+    bool clamp = true;
+    int surface = kAllSurfaces;      // only these surfaces are coloured
+};
 
 struct ViewSettings {
     ViewMode mode = ViewMode::Layers;
@@ -50,6 +60,7 @@ struct ViewSettings {
     bool grid = true;
     float scale = 1.0f;               // user scale factor applied to the mesh
     std::vector<unsigned char> ledSurfaces;  // 1 per LED surface, indexed by surface
+    DistortionView distortion;
 };
 
 // The mesh unwrapped into one UV channel's 0-1 square: what that output would
@@ -61,6 +72,9 @@ struct UvViewSettings {
     std::vector<RenderLayer> layers;  // at most kMaxLayers, bottom to top
     std::vector<unsigned char> ledSurfaces;
     bool wireframe = false;
+    bool showDistortion = false;      // colour by distortion instead of drawing the layers
+    DistortionView distortion;
+    float scale = 1.0f;
 };
 
 // Draws the mesh into an offscreen colour buffer that the UI shows as an image.
@@ -81,6 +95,7 @@ private:
     void resizeTarget(int width, int height);
     void uploadLedSurfaces(const std::vector<unsigned char>& flags);
     void bindLayers(const std::vector<RenderLayer>& layers, const std::vector<unsigned char>& ledSurfaces);
+    void bindDistortion(const DistortionView& distortion);
 
     unsigned meshProgram_ = 0;
     unsigned lineProgram_ = 0;

@@ -79,13 +79,14 @@ std::string sizeText(int width, int height) {
 
 bool App::init(int maxTextureSize) {
     maxTextureSize_ = maxTextureSize;
-    if (!renderer_.init()) return false;
+    if (!renderer_.init() || !generators_.init()) return false;
     log("GPU texture limit: " + std::to_string(maxTextureSize_) + " px per side.");
     return true;
 }
 
 void App::shutdown() {
-    for (Layer& layer : layers_) freeImage(layer.image);
+    for (int i = (int)layers_.size() - 1; i >= 0; --i) removeLayer(i);
+    generators_.shutdown();
     renderer_.shutdown();
 }
 
@@ -198,11 +199,30 @@ void App::showTestGrid(int channel) {
 
 // The mapping's canvas is set by the largest file on it. UV01 on an LED surface
 // has one canvas per surface; projection surfaces share the rest.
+// Files set the size; generators only count on a mapping that has no files, so a
+// generator that follows its mapping never decides the size it follows.
 void App::canvasSize(int channel, int surface, int& width, int& height) const {
     width = height = 0;
     const bool own = perSurface(channel, surface);
+    for (bool generated : {false, true}) {
+        for (const Layer& layer : layers_) {
+            if (layer.generated != generated || layer.channel != channel) continue;
+            if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
+            if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
+                width = layer.image.width;
+                height = layer.image.height;
+            }
+        }
+        if (width > 0) return;
+    }
+}
+
+// The size of the files on a mapping, or 0 x 0 when it has none.
+void App::fileCanvasSize(int channel, int surface, int& width, int& height) const {
+    width = height = 0;
+    const bool own = perSurface(channel, surface);
     for (const Layer& layer : layers_) {
-        if (layer.channel != channel) continue;
+        if (layer.generated || layer.channel != channel) continue;
         if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
         if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
             width = layer.image.width;
@@ -352,7 +372,13 @@ bool App::addLayer(const std::string& path, int channel, int surface) {
 }
 
 void App::removeLayer(int index) {
-    freeImage(layers_[index].image);
+    Layer& layer = layers_[index];
+    if (layer.generated) {
+        Generators::release(layer.target);
+        layer.image = Image{};
+    } else {
+        freeImage(layer.image);
+    }
     layers_.erase(layers_.begin() + index);
 }
 
@@ -394,6 +420,7 @@ void App::frame() {
     }
 
     advanceTime();
+    updateGenerators();
     drawProjectPanel();
     drawLayersPanel();
     drawViewport();
@@ -644,6 +671,20 @@ void App::drawLayersPanel() {
         const std::string folder = pickFolderDialog();
         if (!folder.empty()) importFolder(folder);
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Add generator...")) ImGui::OpenPopup("generators");
+    if (ImGui::BeginPopup("generators")) {
+        ImGui::TextColored(kMutedColor, "Added on %s", placementLabel(uvChannel_, resolvedUvSurface() >= 0 ? resolvedUvSurface() : -1).c_str());
+        for (int t = 0; t < (int)GeneratorType::Count; ++t) {
+            if (ImGui::Selectable(generatorName((GeneratorType)t))) {
+                const int surface = resolvedUvSurface();
+                addGenerator((GeneratorType)t, uvChannel_, surface >= 0 ? surface : -1);
+            }
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Animated patterns such as Bugs, Chevron or Radar. They go on the mapping shown in the UV view.");
     ImGui::EndDisabled();
 
     int visibleCount = 0;
@@ -741,13 +782,15 @@ void App::drawLayerEditor(Layer& layer, int index) {
     ImGui::TextColored(kMutedColor, "On the timeline from %s to %s", timecode(layer.inTime).c_str(),
                        timecode(layer.outTime).c_str());
 
+    if (layer.generated) drawGeneratorEditor(layer);
+
     for (const std::string& warning : layerWarnings(layer)) ImGui::TextColored(kWarningColor, "%s", warning.c_str());
 
     if (ImGui::Button("Up") && index + 1 < (int)layers_.size()) moveLayer(index, index + 1);
     ImGui::SameLine();
     if (ImGui::Button("Down") && index > 0) moveLayer(index, index - 1);
     ImGui::SameLine();
-    if (ImGui::Button("Replace image...")) {
+    if (!layer.generated && ImGui::Button("Replace image...")) {
         const std::string path = openFileDialog(FileKind::Image);
         Image image;
         std::string error;
@@ -810,11 +853,17 @@ void App::drawViewport() {
     ImGui::SetNextItemWidth(190);
     std::string preview = "Layers";
     if (view_.mode == ViewMode::MeshOnly) preview = "Mesh only";
+    if (view_.mode == ViewMode::Distortion)
+        preview = std::string(distortionStretch_ ? "Stretch" : "Pixel density") + " on " + channelLabel(uvChannel_);
     if (view_.mode == ViewMode::TestGrid && channelUsable(gridChannel_))
         preview = "Test grid on " + channelLabel(gridChannel_);
     if (ImGui::BeginCombo("##show", preview.c_str())) {
         if (ImGui::Selectable("Layers", view_.mode == ViewMode::Layers)) view_.mode = ViewMode::Layers;
         if (ImGui::Selectable("Mesh only", view_.mode == ViewMode::MeshOnly)) view_.mode = ViewMode::MeshOnly;
+        if (ImGui::Selectable("Distortion: pixel density", view_.mode == ViewMode::Distortion && !distortionStretch_))
+            showDistortion(false);
+        if (ImGui::Selectable("Distortion: stretch", view_.mode == ViewMode::Distortion && distortionStretch_))
+            showDistortion(true);
         for (int c = 0; c < (int)channels_.size(); ++c) {
             if (!channelUsable(c)) continue;
             const std::string label = "Test grid on " + channelLabel(c) + "  " + mesh_.channels[c].name;
@@ -864,6 +913,17 @@ void App::drawViewport() {
     view_.gridClamp = channelUsable(gridChannel_) ? channels_[gridChannel_].clamp : true;
     view_.scale = scale_;
     view_.ledSurfaces = ledFlags();
+    if (view_.mode == ViewMode::Distortion) {
+        if (!channelUsable(uvChannel_)) view_.mode = ViewMode::Layers;
+        const DistortionFilter filter = distortionFilter();
+        view_.distortion.channel = filter.channel;
+        view_.distortion.stretch = distortionStretch_;
+        view_.distortion.resolution[0] = (float)filter.width;
+        view_.distortion.resolution[1] = (float)filter.height;
+        view_.distortion.meanDensity = summarizeDistortion(mesh_, filter).meanDensity;
+        view_.distortion.clamp = filter.clampInside;
+        view_.distortion.surface = filter.surface;
+    }
     renderer_.render(width, height, camera_, view_);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -877,6 +937,7 @@ void App::drawViewport() {
     }
     drawList->AddText(ImVec2(origin.x + 10, origin.y + height - 24), IM_COL32(120, 125, 135, 255),
                       "Left drag: orbit   Right or middle drag: pan   Wheel: zoom   F: frame");
+    if (view_.mode == ViewMode::Distortion) drawDistortionLegend(drawList, ImVec2(origin.x + 10, origin.y + 10), distortionStretch_);
     ImGui::End();
 }
 
@@ -950,7 +1011,9 @@ std::string App::outputName() const {
     name += "_" + channelLabel(uvChannel_);
     const int surface = resolvedUvSurface();
     if (surface >= 0) name += "_" + surfaceLabel(surface);
-    if (uvMappingOnly_) name += "_mapping";
+    if (uvShow_ == UvShow::Mapping) name += "_mapping";
+    if (uvShow_ == UvShow::Density) name += "_density";
+    if (uvShow_ == UvShow::Stretch) name += "_stretch";
     for (char& c : name)
         if (c == ' ' || c == '/' || c == '\\' || c == ':') c = '_';
     return name + ".png";
@@ -961,9 +1024,21 @@ void App::renderOutput(bool wireframe, int& width, int& height, std::string& not
     settings.channel = uvChannel_;
     settings.surface = resolvedUvSurface();
     outputSize(settings.width, settings.height, note);
-    settings.layers = renderLayers(uvMappingOnly_ ? uvChannel_ : -1);
+    settings.layers = renderLayers(uvShow_ == UvShow::Mapping ? uvChannel_ : -1);
     settings.ledSurfaces = ledFlags();
     settings.wireframe = wireframe;
+    settings.scale = scale_;
+    if (uvShow_ == UvShow::Density || uvShow_ == UvShow::Stretch) {
+        const DistortionFilter filter = distortionFilter();
+        settings.showDistortion = true;
+        settings.distortion.channel = filter.channel;
+        settings.distortion.stretch = uvShow_ == UvShow::Stretch;
+        settings.distortion.resolution[0] = (float)filter.width;
+        settings.distortion.resolution[1] = (float)filter.height;
+        settings.distortion.meanDensity = summarizeDistortion(mesh_, filter).meanDensity;
+        settings.distortion.clamp = filter.clampInside;
+        settings.distortion.surface = filter.surface;
+    }
     renderer_.renderUv(settings);
     width = settings.width;
     height = settings.height;
@@ -975,6 +1050,7 @@ bool App::exportOutputPng(const std::string& path) {
         return false;
     }
     // Rendered without the wireframe overlay, so the PNG is the output itself.
+    updateGenerators();
     int width = 0, height = 0;
     std::string note;
     renderOutput(false, width, height, note);
@@ -1043,14 +1119,23 @@ void App::drawUvView() {
     uvSurfaceCombo();
     ImGui::SameLine();
     ImGui::SetNextItemWidth(150);
-    if (ImGui::BeginCombo("##uvshow", uvMappingOnly_ ? "This mapping only" : "Output (all layers)")) {
-        if (ImGui::Selectable("Output (all layers)", !uvMappingOnly_)) uvMappingOnly_ = false;
-        if (ImGui::Selectable("This mapping only", uvMappingOnly_)) uvMappingOnly_ = true;
+    const char* showNames[] = {"Output (all layers)", "This mapping only", "Distortion: pixel density",
+                               "Distortion: stretch"};
+    if (ImGui::BeginCombo("##uvshow", showNames[(int)uvShow_])) {
+        for (int i = 0; i < 4; ++i) {
+            if (ImGui::Selectable(showNames[i], (int)uvShow_ == i)) {
+                uvShow_ = (UvShow)i;
+                if (uvShow_ == UvShow::Density || uvShow_ == UvShow::Stretch)
+                    distortionStretch_ = uvShow_ == UvShow::Stretch;
+            }
+        }
         ImGui::EndCombo();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Output: every layer combined, as this UV layout would receive it.\n"
-                          "This mapping only: just the layers placed on this mapping.");
+                          "This mapping only: just the layers placed on this mapping.\n"
+                          "Pixel density: pixels per metre against the average (green even, blue fewer, red more).\n"
+                          "Stretch: how far pixels are from square (green square, red stretched 2x or more).");
 
     if (!channelUsable(uvChannel_)) {
         ImGui::TextColored(kMutedColor, "Every UV channel is ignored.");
@@ -1061,6 +1146,7 @@ void App::drawUvView() {
     int outputWidth = 0, outputHeight = 0;
     std::string note;
     renderOutput(uvWireframe_, outputWidth, outputHeight, note);
+    const bool showingDistortion = uvShow_ == UvShow::Density || uvShow_ == UvShow::Stretch;
 
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
     ImGui::AlignTextToFramePadding();
@@ -1127,16 +1213,235 @@ void App::drawUvView() {
         io.MousePos.y < imageMax.y) {
         const float u = (io.MousePos.x - imageMin.x) / imageWidth;
         const float v = 1.0f - (io.MousePos.y - imageMin.y) / imageHeight;
-        char text[96];
-        std::snprintf(text, sizeof(text), "Pixel %d, %d   UV %.4f, %.4f", (int)(u * outputWidth),
-                      (int)((1.0f - v) * outputHeight), u, v);
+        char text[160];
+        int used = std::snprintf(text, sizeof(text), "Pixel %d, %d   UV %.4f, %.4f", (int)(u * outputWidth),
+                                 (int)((1.0f - v) * outputHeight), u, v);
+        if (showingDistortion) {
+            const DistortionFilter filter = distortionFilter();
+            const long triangle = findTriangleAt(mesh_, filter, u, v);
+            const DistortionSample sample =
+                triangle >= 0 ? triangleDistortion(mesh_, (size_t)triangle, filter) : DistortionSample{};
+            if (sample.valid && used > 0 && used < (int)sizeof(text))
+                std::snprintf(text + used, sizeof(text) - used, "   %.0f px/m (pitch %.2f mm)   stretch %.2f",
+                              sample.density, 1000.0f / sample.density, sample.stretch);
+        }
         drawList->AddText(ImVec2(origin.x + 10, origin.y + areaHeight - 44), IM_COL32(200, 205, 215, 255), text);
+    }
+    if (showingDistortion) {
+        drawDistortionLegend(drawList, ImVec2(origin.x + 10, origin.y + 10), uvShow_ == UvShow::Stretch);
+        const DistortionSummary summary = summarizeDistortion(mesh_, distortionFilter());
+        char text[200];
+        if (summary.triangles > 0)
+            std::snprintf(text, sizeof(text),
+                          "Average %.0f px/m (pitch %.2f mm), range %.0f to %.0f px/m\nStretch average %.2f, worst %.2f",
+                          summary.meanDensity, 1000.0f / summary.meanDensity, summary.minDensity, summary.maxDensity,
+                          summary.meanStretch, std::min(summary.maxStretch, 999.0f));
+        else
+            std::snprintf(text, sizeof(text), "No part of the mesh uses this mapping inside 0-1.");
+        const ImVec2 textSize = ImGui::CalcTextSize(text);
+        const ImVec2 textPos(origin.x + 10, origin.y + 62);
+        drawList->AddRectFilled(ImVec2(textPos.x - 6, textPos.y - 4),
+                                ImVec2(textPos.x + textSize.x + 6, textPos.y + textSize.y + 4), IM_COL32(20, 21, 25, 210),
+                                4.0f);
+        drawList->AddText(textPos, IM_COL32(200, 205, 215, 255), text);
     }
     char zoomText[64];
     std::snprintf(zoomText, sizeof(zoomText), "Zoom %.0f%%   Wheel: zoom   Drag: pan", zoom * 100.0f);
     drawList->AddText(ImVec2(origin.x + 10, origin.y + areaHeight - 24), IM_COL32(120, 125, 135, 255), zoomText);
     drawList->PopClipRect();
     ImGui::End();
+}
+
+// What the distortion colours measure: the UV view's mapping at its output size.
+DistortionFilter App::distortionFilter() const {
+    static std::vector<unsigned char> flags;
+    flags = ledFlags();
+    DistortionFilter filter;
+    filter.channel = std::clamp(uvChannel_, 0, std::max(0, (int)channels_.size() - 1));
+    filter.surface = resolvedUvSurface();
+    filter.ledSurfaces = &flags;
+    filter.clampInside = channelUsable(filter.channel) ? channels_[filter.channel].clamp : true;
+    std::string note;
+    outputSize(filter.width, filter.height, note);
+    filter.scale = scale_;
+    return filter;
+}
+
+void App::drawDistortionLegend(ImDrawList* drawList, ImVec2 corner, bool stretch) const {
+    const ImU32 blue = IM_COL32(51, 115, 255, 255), green = IM_COL32(64, 204, 89, 255);
+    const ImU32 yellow = IM_COL32(242, 217, 51, 255), red = IM_COL32(255, 64, 51, 255);
+    const float width = 220.0f, height = 12.0f;
+    const ImVec2 a(corner.x, corner.y + 18.0f), mid(corner.x + width * 0.5f, corner.y + 18.0f + height);
+    drawList->AddRectFilled(ImVec2(corner.x - 6, corner.y - 4), ImVec2(corner.x + width + 6, corner.y + 46),
+                            IM_COL32(20, 21, 25, 210), 4.0f);
+    if (stretch) {
+        drawList->AddText(corner, IM_COL32(220, 222, 230, 255), "Stretch (pixel aspect)");
+        drawList->AddRectFilledMultiColor(a, mid, green, yellow, yellow, green);
+        drawList->AddRectFilledMultiColor(ImVec2(mid.x, a.y), ImVec2(a.x + width, mid.y), yellow, red, red, yellow);
+        drawList->AddText(ImVec2(a.x, mid.y + 1), IM_COL32(180, 185, 195, 255), "1.0");
+        drawList->AddText(ImVec2(mid.x - 12, mid.y + 1), IM_COL32(180, 185, 195, 255), "1.5");
+        drawList->AddText(ImVec2(a.x + width - 30, mid.y + 1), IM_COL32(180, 185, 195, 255), "2.0+");
+    } else {
+        drawList->AddText(corner, IM_COL32(220, 222, 230, 255), "Pixel density vs average");
+        drawList->AddRectFilledMultiColor(a, mid, blue, green, green, blue);
+        drawList->AddRectFilledMultiColor(ImVec2(mid.x, a.y), ImVec2(a.x + width, mid.y), green, red, red, green);
+        drawList->AddText(ImVec2(a.x, mid.y + 1), IM_COL32(180, 185, 195, 255), "half");
+        drawList->AddText(ImVec2(mid.x - 14, mid.y + 1), IM_COL32(180, 185, 195, 255), "even");
+        drawList->AddText(ImVec2(a.x + width - 44, mid.y + 1), IM_COL32(180, 185, 195, 255), "double");
+    }
+}
+
+void App::showDistortion(bool stretch) {
+    distortionStretch_ = stretch;
+    view_.mode = ViewMode::Distortion;
+    showUvView_ = true;
+    uvShow_ = stretch ? UvShow::Stretch : UvShow::Density;
+}
+
+std::string App::generatorLabel(const Layer& layer) const {
+    std::string label = placementLabel(layer.channel, layer.surface);
+    for (char& c : label)
+        if (c == ',') c = ' ';
+    return label + "  " + std::to_string(layer.generator.width) + "X" + std::to_string(layer.generator.height);
+}
+
+void App::addGenerator(GeneratorType type, int channel, int surface) {
+    if (mesh_.empty() || !channelUsable(channel)) {
+        log("Open a mesh and pick a usable UV channel before adding a generator.");
+        return;
+    }
+    if (needsSurface(channel) && surface < 0) {
+        for (int s = 0; s < (int)mesh_.surfaces.size() && surface < 0; ++s)
+            if (isLedSurface(s)) surface = s;
+    }
+    int width = 0, height = 0;
+    canvasSize(channel, surface, width, height);
+    if (width <= 0 || height <= 0) width = 1920, height = 1080;
+    Layer layer;
+    layer.followMapping = true;
+    layer.id = nextLayerId_++;
+    layer.generated = true;
+    layer.channel = channel;
+    layer.surface = surface;
+    layer.inTime = 0.0;
+    layer.outTime = length_;
+    layer.generator = defaultGenerator(type, std::min(width, maxTextureSize_), std::min(height, maxTextureSize_));
+    layer.generator.label = generatorLabel(layer);
+    layer.image.name = generatorName(type);
+    layer.image.width = layer.generator.width;
+    layer.image.height = layer.generator.height;
+    layers_.push_back(layer);
+    selectedLayer_ = layer.id;
+    log(std::string(generatorName(type)) + " -> " + placementLabel(channel, surface) + " (" +
+        sizeText(layer.generator.width, layer.generator.height) + ")");
+}
+
+// Generators draw before the views, at their layer's own time (zero at its in point).
+void App::updateGenerators() {
+    for (Layer& layer : layers_) {
+        if (!layer.generated) continue;
+        if (layer.followMapping) {
+            // Track the mapping, including after the layer moves to another one.
+            int width = 0, height = 0;
+            fileCanvasSize(layer.channel, layer.surface, width, height);
+            if (width > 0 && height > 0) {
+                layer.generator.width = std::min(width, maxTextureSize_);
+                layer.generator.height = std::min(height, maxTextureSize_);
+            }
+            layer.generator.label = generatorLabel(layer);
+        }
+        layer.image.width = layer.generator.width;
+        layer.image.height = layer.generator.height;
+        if (!layer.visible || !layerActive(layer)) continue;
+        generators_.render(layer.generator, time_ - layer.inTime, layer.target);
+        layer.image.texture = layer.target.texture;
+    }
+}
+
+void App::drawGeneratorEditor(Layer& layer) {
+    GeneratorSettings& g = layer.generator;
+    ImGui::SeparatorText("Generator");
+    const float fieldWidth = std::max(120.0f, ImGui::GetContentRegionAvail().x - 110.0f);
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::BeginCombo("Pattern", generatorName(g.type))) {
+        for (int t = 0; t < (int)GeneratorType::Count; ++t) {
+            if (ImGui::Selectable(generatorName((GeneratorType)t), (int)g.type == t)) {
+                const std::string label = g.label;
+                g = defaultGenerator((GeneratorType)t, g.width, g.height);
+                g.label = label;
+                layer.image.name = generatorName(g.type);
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    int size[2] = {g.width, g.height};
+    ImGui::SetNextItemWidth(fieldWidth * 0.6f);
+    if (ImGui::InputInt2("##gensize", size, ImGuiInputTextFlags_EnterReturnsTrue)) {
+        g.width = std::clamp(size[0], 1, maxTextureSize_);
+        g.height = std::clamp(size[1], 1, maxTextureSize_);
+        layer.followMapping = false;
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Match mapping", &layer.followMapping);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Draw at the mapping's pixel size, set by its largest file, and follow it when\n"
+                          "the layer moves to another mapping. Typing a size turns this off.");
+
+    ImGui::ColorEdit3("Colour", g.color, ImGuiColorEditFlags_NoInputs);
+    ImGui::SameLine();
+    ImGui::ColorEdit3("Background", g.background, ImGuiColorEditFlags_NoInputs);
+    ImGui::SameLine();
+    ImGui::Checkbox("See-through", &g.transparent);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leave the background empty so the layers below show through.");
+
+    ImGui::SetNextItemWidth(fieldWidth);
+    ImGui::SliderFloat("Speed", &g.speed, 0.0f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    const GeneratorType type = g.type;
+    const char* sizeLabel = type == GeneratorType::Bugs ? "Bug size (px)"
+                            : type == GeneratorType::Chevron ? "Stripe (px)"
+                            : type == GeneratorType::Scan ? "Line width (px)"
+                            : type == GeneratorType::Radar ? "Ring step"
+                            : type == GeneratorType::Noise ? "Scale"
+                                                           : "Grid (px)";
+    if (type != GeneratorType::Gradient && type != GeneratorType::Tiles) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::DragFloat(sizeLabel, &g.size, 0.5f, 1.0f, 2000.0f, "%.0f");
+    }
+    if (type == GeneratorType::Bugs) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::SliderFloat("Amount", &g.density, 0.0f, 1.0f, "%.2f");
+    }
+    if (type == GeneratorType::Bugs || type == GeneratorType::Radar || type == GeneratorType::Scan) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::SliderFloat("Trail", &g.trail, 0.0f, 1.0f, "%.2f");
+    }
+    if (type == GeneratorType::Chevron || type == GeneratorType::Scan || type == GeneratorType::Gradient) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::SliderFloat("Direction", &g.angle, -180.0f, 180.0f, "%.0f deg");
+    }
+    if (type == GeneratorType::Radar) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::SliderFloat2("Centre", g.center, 0.0f, 1.0f, "%.2f");
+    }
+    if (type == GeneratorType::Tiles) {
+        int grid[2] = {g.columns, g.rows};
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::InputInt2("Columns, rows", grid)) {
+            g.columns = std::clamp(grid[0], 1, 64);
+            g.rows = std::clamp(grid[1], 1, 64);
+        }
+    }
+    if (type == GeneratorType::Bugs || type == GeneratorType::Noise) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::InputInt("Seed", &g.seed);
+    }
+    if (type == GeneratorType::TestPattern) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "%s", g.label.c_str());
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::InputText("Label", label, sizeof(label))) g.label = label;
+    }
 }
 
 double App::snapToFrame(double seconds) const {

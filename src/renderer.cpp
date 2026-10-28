@@ -8,6 +8,8 @@
 
 #include <glad/gl.h>
 
+#include "gl_util.h"
+
 namespace {
 
 constexpr float kPi = 3.14159265358979f;
@@ -49,6 +51,12 @@ uniform bool uGridClamp;
 uniform bool uWire;
 uniform int uOnlySurface;  // -1 every surface, -2 projection surfaces only, else one surface
 uniform bool uOutput;      // output preview: no mesh shading, black where no layer covers
+uniform int uDistChannel;
+uniform bool uDistStretch;
+uniform vec2 uDistResolution;
+uniform float uDistMean;
+uniform bool uDistClamp;
+uniform int uDistSurface;
 uniform int uLayerCount;
 uniform int uLayerChannel[MAX_LAYERS];
 uniform int uLayerSurface[MAX_LAYERS];
@@ -99,6 +107,44 @@ bool isLedSurface() {
     return texelFetch(uLedSurfaces, ivec2(vSurface, 0), 0).r > 0.5;
 }
 
+// Pixels per metre along the two principal directions, from screen-space derivatives.
+// Works in the 3D view and in the flat UV view, since both interpolate world position and UV.
+vec2 pixelSpread(vec2 uv) {
+    vec3 dpdx = dFdx(vWorld), dpdy = dFdy(vWorld);
+    vec2 dudx = dFdx(uv) * uDistResolution, dudy = dFdy(uv) * uDistResolution;
+    float ax = length(dpdx);
+    vec3 n = cross(dpdx, dpdy);
+    if (ax < 1e-12 || length(n) < 1e-18) return vec2(0.0);
+    vec3 xAxis = dpdx / ax;
+    vec3 yAxis = normalize(cross(n, dpdx));
+    float bx = dot(dpdy, xAxis), by = dot(dpdy, yAxis);
+    vec2 c0 = dudx / ax;
+    vec2 c1 = (dudy - c0 * bx) / by;
+    float e = (c0.x + c1.y) * 0.5, f = (c0.x - c1.y) * 0.5;
+    float g = (c0.y + c1.x) * 0.5, h = (c0.y - c1.x) * 0.5;
+    float q = sqrt(e * e + h * h), r = sqrt(f * f + g * g);
+    return vec2(q + r, abs(q - r));
+}
+
+// Green is even; blue has fewer pixels than average (or is square), red more (or stretched).
+vec3 distortionColor(vec3 base) {
+    vec3 grey = base * 1.4;
+    if (uDistSurface >= 0 && vSurface != uDistSurface) return grey;
+    if (uDistSurface == -2 && isLedSurface()) return grey;
+    vec2 uv = channelUv(uDistChannel);
+    if (uv.x <= -9.0 || (uDistClamp && !insideUnitSquare(uv))) return grey;
+    vec2 spread = pixelSpread(uv);
+    if (spread.x <= 0.0) return grey;
+    vec3 blue = vec3(0.20, 0.45, 1.0), green = vec3(0.25, 0.80, 0.35);
+    vec3 yellow = vec3(0.95, 0.85, 0.20), red = vec3(1.0, 0.25, 0.20);
+    if (uDistStretch) {
+        float t = clamp(spread.x / max(spread.y, 1e-6) - 1.0, 0.0, 1.0);
+        return t < 0.5 ? mix(green, yellow, t * 2.0) : mix(yellow, red, t * 2.0 - 1.0);
+    }
+    float t = clamp(log2(sqrt(spread.x * spread.y) / max(uDistMean, 1e-6)), -1.0, 1.0);
+    return t < 0.0 ? mix(green, blue, -t) : mix(green, red, t);
+}
+
 void applyLayer(int i, vec2 uv, vec4 texel) {
     float visible = uLayerClamp[i] && !insideUnitSquare(uv) ? 0.0 : 1.0;
     if (uLayerSurface[i] >= 0 && uLayerSurface[i] != vSurface) visible = 0.0;
@@ -145,6 +191,10 @@ void main() {
         fragColor = vec4(hidden ? base : uvTestGrid(uGridClamp ? uv : fract(uv)), 1.0);
         return;
     }
+    if (uMode == 3) {
+        fragColor = vec4(distortionColor(base) * (uOutput ? 1.0 : 0.75 + 0.25 * shade), 1.0);
+        return;
+    }
     // @LAYER_CODE
     fragColor = vec4(color + base * (1.0 - coverage), 1.0);
 }
@@ -176,43 +226,6 @@ out vec4 fragColor;
 void main() { fragColor = uColor; }
 )";
 
-unsigned compileShader(GLenum type, const char* source) {
-    const GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-    GLint ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[2048];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "Shader compile error:\n%s\n", log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-unsigned linkProgram(const char* vertexSource, const char* fragmentSource) {
-    const GLuint vertex = compileShader(GL_VERTEX_SHADER, vertexSource);
-    const GLuint fragment = compileShader(GL_FRAGMENT_SHADER, fragmentSource);
-    if (!vertex || !fragment) return 0;
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vertex);
-    glAttachShader(program, fragment);
-    glLinkProgram(program);
-    glDeleteShader(vertex);
-    glDeleteShader(fragment);
-    GLint ok = 0;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[2048];
-        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "Shader link error:\n%s\n", log);
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
 
 void multiply(const float a[16], const float b[16], float out[16]) {
     float result[16];
@@ -446,6 +459,15 @@ void Renderer::bindLayers(const std::vector<RenderLayer>& layers, const std::vec
     glUniform1iv(glGetUniformLocation(meshProgram_, "uTexture"), kMaxLayers, units);
 }
 
+void Renderer::bindDistortion(const DistortionView& distortion) {
+    glUniform1i(glGetUniformLocation(meshProgram_, "uDistChannel"), distortion.channel);
+    glUniform1i(glGetUniformLocation(meshProgram_, "uDistStretch"), distortion.stretch);
+    glUniform2fv(glGetUniformLocation(meshProgram_, "uDistResolution"), 1, distortion.resolution);
+    glUniform1f(glGetUniformLocation(meshProgram_, "uDistMean"), distortion.meanDensity);
+    glUniform1i(glGetUniformLocation(meshProgram_, "uDistClamp"), distortion.clamp);
+    glUniform1i(glGetUniformLocation(meshProgram_, "uDistSurface"), distortion.surface);
+}
+
 void Renderer::render(int width, int height, const OrbitCamera& camera, const ViewSettings& view) {
     width = std::max(width, 1);
     height = std::max(height, 1);
@@ -482,6 +504,7 @@ void Renderer::render(int width, int height, const OrbitCamera& camera, const Vi
         glUniform1i(glGetUniformLocation(meshProgram_, "uOnlySurface"), kAllSurfaces);
         glUniform1i(glGetUniformLocation(meshProgram_, "uOutput"), 0);
         bindLayers(view.layers, view.ledSurfaces);
+        bindDistortion(view.distortion);
         glBindVertexArray(meshVao_);
 
         glEnable(GL_POLYGON_OFFSET_FILL);
@@ -535,13 +558,15 @@ void Renderer::renderUv(const UvViewSettings& view) {
 
     if (meshVertexCount_ > 0) {
         glUseProgram(meshProgram_);
-        glUniform1f(glGetUniformLocation(meshProgram_, "uScale"), 1.0f);
+        glUniform1f(glGetUniformLocation(meshProgram_, "uScale"), view.scale);
         glUniform1i(glGetUniformLocation(meshProgram_, "uLayoutChannel"), view.channel);
         glUniform1i(glGetUniformLocation(meshProgram_, "uOnlySurface"), view.surface);
         glUniform1i(glGetUniformLocation(meshProgram_, "uOutput"), 1);
-        glUniform1i(glGetUniformLocation(meshProgram_, "uMode"), (int)ViewMode::Layers);
+        glUniform1i(glGetUniformLocation(meshProgram_, "uMode"),
+                    (int)(view.showDistortion ? ViewMode::Distortion : ViewMode::Layers));
         glUniform1i(glGetUniformLocation(meshProgram_, "uWire"), 0);
         bindLayers(view.layers, view.ledSurfaces);
+        bindDistortion(view.distortion);
         glBindVertexArray(meshVao_);
         glDrawArrays(GL_TRIANGLES, 0, meshVertexCount_);
 

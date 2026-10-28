@@ -58,6 +58,9 @@ add_executable(MultiChannelUVPlayer
     src/mesh.cpp
     src/media.cpp
     src/renderer.cpp
+    src/gl_util.cpp
+    src/generators.cpp
+    src/distortion.cpp
     src/file_dialog.cpp
     src/stb_impl.cpp)
 target_include_directories(MultiChannelUVPlayer PRIVATE src ${stb_SOURCE_DIR})

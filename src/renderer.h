@@ -1,6 +1,14 @@
 #pragma once
 
+#include <vector>
+
 #include "mesh.h"
+
+// Layers drawn in one pass; each needs its own texture unit (OpenGL 3.3 guarantees 16).
+constexpr int kMaxLayers = 15;
+
+enum class BlendMode { Normal, Add, Multiply, Screen, Mask, Count };
+const char* blendModeName(BlendMode mode);
 
 // Orbit camera around a target point, in metres.
 struct OrbitCamera {
@@ -18,13 +26,26 @@ struct OrbitCamera {
     void viewProjection(float aspect, float out[16]) const;
 };
 
-struct ViewSettings {
-    int channel = -1;         // UV channel to show, or -1 for the bare mesh
-    unsigned texture = 0;     // image on that channel, or 0 for the UV test grid
+// One layer as the renderer needs it. Layers are listed bottom to top.
+struct RenderLayer {
+    unsigned texture = 0;
+    int channel = 0;          // UV channel the media is mapped through
+    int surface = -1;         // only this surface, or -1 for every surface
+    BlendMode blend = BlendMode::Normal;
+    float opacity = 1.0f;
     bool clamp = true;        // hide content outside the 0-1 UV square
+};
+
+enum class ViewMode { Layers, MeshOnly, TestGrid };
+
+struct ViewSettings {
+    ViewMode mode = ViewMode::Layers;
+    std::vector<RenderLayer> layers;  // at most kMaxLayers, bottom to top
+    int gridChannel = 0;              // channel shown by the UV test grid
+    bool gridClamp = true;
     bool wireframe = false;
     bool grid = true;
-    float scale = 1.0f;       // user scale factor applied to the mesh
+    float scale = 1.0f;               // user scale factor applied to the mesh
 };
 
 // Draws the mesh into an offscreen colour buffer that the UI shows as an image.

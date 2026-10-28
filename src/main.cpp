@@ -1,7 +1,7 @@
 // Multi-Channel UV Player: plays media onto the UV channels of an FBX mesh.
 //
 // Usage: MultiChannelUVPlayer [mesh.fbx] [images or folders...]
-//        [--view N] [--wireframe] [--size WxH] [--screenshot out.png]
+//        [--led] [--grid N] [--wireframe] [--size WxH] [--screenshot out.png]
 // --screenshot renders a few frames, saves the window to a PNG and exits (used for testing).
 
 #include <cstdio>
@@ -106,7 +106,8 @@ bool saveScreenshot(GLFWwindow* window, const std::string& path) {
 int main(int argc, char** argv) {
     std::vector<std::string> inputs;
     std::string screenshotPath;
-    int viewChannel = 0;  // 1-based on the command line, 0 = leave the default
+    int gridChannel = 0;  // 1-based on the command line, 0 = show the layers
+    bool led = false;
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -114,7 +115,8 @@ int main(int argc, char** argv) {
         const std::string& arg = args[i];
         const bool hasValue = i + 1 < args.size();
         if (arg == "--screenshot" && hasValue) screenshotPath = args[++i];
-        else if (arg == "--view" && hasValue) viewChannel = std::atoi(args[++i].c_str());
+        else if (arg == "--grid" && hasValue) gridChannel = std::atoi(args[++i].c_str());
+        else if (arg == "--led") led = true;
         else if (arg == "--wireframe") wireframe = true;
         else if (arg == "--size" && hasValue) std::sscanf(args[++i].c_str(), "%dx%d", &windowWidth, &windowHeight);
         else inputs.push_back(arg);
@@ -166,8 +168,9 @@ int main(int argc, char** argv) {
     }
     glfwSetWindowUserPointer(window, &app);
     glfwSetDropCallback(window, onDrop);
+    if (led) app.setMode(MappingMode::Led);
     for (const std::string& input : inputs) app.importPath(input);
-    if (viewChannel > 0) app.setViewChannel(viewChannel - 1);
+    if (gridChannel > 0) app.showTestGrid(gridChannel - 1);
     if (wireframe) app.setWireframe(true);
 
     int frameCount = 0;

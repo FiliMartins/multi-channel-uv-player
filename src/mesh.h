@@ -8,13 +8,17 @@
 // The renderer passes every UV channel to the shader, so the count is capped.
 constexpr int kMaxUvChannels = 8;
 
-// Interleaved vertex: position (3 floats) followed by one UV pair per channel.
-constexpr int kVertexFloats = 3 + 2 * kMaxUvChannels;
+// Interleaved vertex: position (3 floats), surface index (1 float), then one UV
+// pair per channel.
+constexpr int kSurfaceOffset = 3;
+constexpr int kUvOffset = 4;
+constexpr int kVertexFloats = kUvOffset + 2 * kMaxUvChannels;
 
 // UV written for surfaces that lack a channel; outside 0-1 so clamping hides it.
 constexpr float kMissingUv = -10.0f;
 
-// One object of the FBX that holds geometry, e.g. "Wall 1" in an LED setup.
+// One object of the FBX that holds geometry, e.g. "Wall 1" in an LED setup, or
+// one material of an object that has several.
 struct Surface {
     std::string name;
     uint32_t firstVertex = 0;

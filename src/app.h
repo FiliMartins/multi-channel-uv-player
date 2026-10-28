@@ -28,6 +28,7 @@ struct Layer {
     int id = 0;
     Image image;  // for a generator: its name, size and the texture it draws into
     bool generated = false;
+    bool followMapping = false;  // generator size tracks its mapping's size
     GeneratorSettings generator;
     GeneratorTarget target;
     int channel = 0;
@@ -90,6 +91,7 @@ private:
     std::string surfaceLabel(int surface) const;
     std::string placementLabel(int channel, int surface) const;
     void canvasSize(int channel, int surface, int& width, int& height) const;
+    void fileCanvasSize(int channel, int surface, int& width, int& height) const;
     std::vector<std::string> layerWarnings(const Layer& layer) const;
     int selectedIndex() const;
     void log(const std::string& message);

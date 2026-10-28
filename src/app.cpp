@@ -199,11 +199,30 @@ void App::showTestGrid(int channel) {
 
 // The mapping's canvas is set by the largest file on it. UV01 on an LED surface
 // has one canvas per surface; projection surfaces share the rest.
+// Files set the size; generators only count on a mapping that has no files, so a
+// generator that follows its mapping never decides the size it follows.
 void App::canvasSize(int channel, int surface, int& width, int& height) const {
     width = height = 0;
     const bool own = perSurface(channel, surface);
+    for (bool generated : {false, true}) {
+        for (const Layer& layer : layers_) {
+            if (layer.generated != generated || layer.channel != channel) continue;
+            if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
+            if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
+                width = layer.image.width;
+                height = layer.image.height;
+            }
+        }
+        if (width > 0) return;
+    }
+}
+
+// The size of the files on a mapping, or 0 x 0 when it has none.
+void App::fileCanvasSize(int channel, int surface, int& width, int& height) const {
+    width = height = 0;
+    const bool own = perSurface(channel, surface);
     for (const Layer& layer : layers_) {
-        if (layer.channel != channel) continue;
+        if (layer.generated || layer.channel != channel) continue;
         if (own ? layer.surface != surface : perSurface(channel, layer.surface)) continue;
         if ((long long)layer.image.width * layer.image.height > (long long)width * height) {
             width = layer.image.width;
@@ -1299,6 +1318,7 @@ void App::addGenerator(GeneratorType type, int channel, int surface) {
     canvasSize(channel, surface, width, height);
     if (width <= 0 || height <= 0) width = 1920, height = 1080;
     Layer layer;
+    layer.followMapping = true;
     layer.id = nextLayerId_++;
     layer.generated = true;
     layer.channel = channel;
@@ -1320,6 +1340,16 @@ void App::addGenerator(GeneratorType type, int channel, int surface) {
 void App::updateGenerators() {
     for (Layer& layer : layers_) {
         if (!layer.generated) continue;
+        if (layer.followMapping) {
+            // Track the mapping, including after the layer moves to another one.
+            int width = 0, height = 0;
+            fileCanvasSize(layer.channel, layer.surface, width, height);
+            if (width > 0 && height > 0) {
+                layer.generator.width = std::min(width, maxTextureSize_);
+                layer.generator.height = std::min(height, maxTextureSize_);
+            }
+            layer.generator.label = generatorLabel(layer);
+        }
         layer.image.width = layer.generator.width;
         layer.image.height = layer.generator.height;
         if (!layer.visible || !layerActive(layer)) continue;
@@ -1350,18 +1380,13 @@ void App::drawGeneratorEditor(Layer& layer) {
     if (ImGui::InputInt2("##gensize", size, ImGuiInputTextFlags_EnterReturnsTrue)) {
         g.width = std::clamp(size[0], 1, maxTextureSize_);
         g.height = std::clamp(size[1], 1, maxTextureSize_);
+        layer.followMapping = false;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Match mapping")) {
-        int width = 0, height = 0;
-        canvasSize(layer.channel, layer.surface, width, height);
-        if (width > 0) {
-            g.width = std::min(width, maxTextureSize_);
-            g.height = std::min(height, maxTextureSize_);
-        }
-        g.label = generatorLabel(layer);
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw at the mapping's pixel size, set by its largest file.");
+    ImGui::Checkbox("Match mapping", &layer.followMapping);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Draw at the mapping's pixel size, set by its largest file, and follow it when\n"
+                          "the layer moves to another mapping. Typing a size turns this off.");
 
     ImGui::ColorEdit3("Colour", g.color, ImGuiColorEditFlags_NoInputs);
     ImGui::SameLine();

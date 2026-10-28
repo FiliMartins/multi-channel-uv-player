@@ -21,6 +21,7 @@ const char* kLayersWindow = "Layers";
 const char* kViewportWindow = "3D View";
 const char* kUvWindow = "UV View";
 const char* kLogWindow = "Log";
+const char* kTimelineWindow = "Timeline";
 const char* kLayerPayload = "LAYER_INDEX";
 
 const ImVec4 kWarningColor(0.95f, 0.75f, 0.30f, 1.0f);
@@ -336,6 +337,8 @@ bool App::addLayer(const std::string& path, int channel, int surface) {
         return false;
     }
     layer.id = nextLayerId_++;
+    layer.inTime = 0.0;
+    layer.outTime = length_;
     layer.channel = channel;
     layer.surface = surface;
     layers_.push_back(layer);
@@ -374,24 +377,28 @@ void App::frame() {
             ImGui::DockBuilderRemoveNode(dockspace);
             ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
             ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->Size);
-            ImGuiID left = 0, right = 0, bottom = 0, leftBottom = 0, uv = 0;
-            ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Left, 0.30f, &left, &right);
+            ImGuiID top = 0, bottom = 0, logNode = 0, left = 0, right = 0, leftBottom = 0, uv = 0;
+            ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Down, 0.28f, &bottom, &top);
+            ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.25f, &logNode, &bottom);
+            ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.30f, &left, &right);
             ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5f, &leftBottom, &left);
-            ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.18f, &bottom, &right);
             ImGui::DockBuilderSplitNode(right, ImGuiDir_Right, 0.45f, &uv, &right);
+            ImGui::DockBuilderDockWindow(kTimelineWindow, bottom);
             ImGui::DockBuilderDockWindow(kProjectWindow, left);
             ImGui::DockBuilderDockWindow(kLayersWindow, leftBottom);
             ImGui::DockBuilderDockWindow(kViewportWindow, right);
             ImGui::DockBuilderDockWindow(kUvWindow, uv);
-            ImGui::DockBuilderDockWindow(kLogWindow, bottom);
+            ImGui::DockBuilderDockWindow(kLogWindow, logNode);
             ImGui::DockBuilderFinish(dockspace);
         }
     }
 
+    advanceTime();
     drawProjectPanel();
     drawLayersPanel();
     drawViewport();
     drawUvView();
+    drawTimeline();
     drawLog();
 }
 
@@ -720,6 +727,20 @@ void App::drawLayerEditor(Layer& layer, int index) {
     float percent = layer.opacity * 100.0f;
     if (ImGui::SliderFloat("Opacity", &percent, 0.0f, 100.0f, "%.0f%%")) layer.opacity = percent / 100.0f;
 
+    const double frame = 1.0 / fps_;
+    ImGui::SetNextItemWidth(fieldWidth * 0.5f);
+    if (ImGui::InputDouble("##in", &layer.inTime, frame, 1.0, "%.3f s"))
+        layer.inTime = std::clamp(snapToFrame(layer.inTime), 0.0, layer.outTime - frame);
+    ImGui::SameLine();
+    if (ImGui::Button("In = playhead")) layer.inTime = std::min(time_, layer.outTime - frame);
+    ImGui::SetNextItemWidth(fieldWidth * 0.5f);
+    if (ImGui::InputDouble("##out", &layer.outTime, frame, 1.0, "%.3f s"))
+        layer.outTime = std::clamp(snapToFrame(layer.outTime), layer.inTime + frame, length_);
+    ImGui::SameLine();
+    if (ImGui::Button("Out = playhead")) layer.outTime = std::max(time_, layer.inTime + frame);
+    ImGui::TextColored(kMutedColor, "On the timeline from %s to %s", timecode(layer.inTime).c_str(),
+                       timecode(layer.outTime).c_str());
+
     for (const std::string& warning : layerWarnings(layer)) ImGui::TextColored(kWarningColor, "%s", warning.c_str());
 
     if (ImGui::Button("Up") && index + 1 < (int)layers_.size()) moveLayer(index, index + 1);
@@ -865,6 +886,7 @@ std::vector<RenderLayer> App::renderLayers(int onlyChannel) const {
     for (const Layer& layer : layers_) {
         if (!layer.visible || !layer.image.texture || !channelUsable(layer.channel)) continue;
         if (onlyChannel >= 0 && layer.channel != onlyChannel) continue;
+        if (!layerActive(layer)) continue;
         RenderLayer render;
         render.texture = layer.image.texture;
         render.channel = layer.channel;
@@ -1114,6 +1136,241 @@ void App::drawUvView() {
     std::snprintf(zoomText, sizeof(zoomText), "Zoom %.0f%%   Wheel: zoom   Drag: pan", zoom * 100.0f);
     drawList->AddText(ImVec2(origin.x + 10, origin.y + areaHeight - 24), IM_COL32(120, 125, 135, 255), zoomText);
     drawList->PopClipRect();
+    ImGui::End();
+}
+
+double App::snapToFrame(double seconds) const {
+    return std::round(seconds * fps_) / fps_;
+}
+
+// Hours:minutes:seconds:frames, as on a media server timeline.
+std::string App::timecode(double seconds) const {
+    const long long frames = std::llround(std::max(seconds, 0.0) * fps_);
+    const long long totalSeconds = frames / fps_;
+    char text[64];
+    std::snprintf(text, sizeof(text), "%02lld:%02lld:%02lld:%02lld", totalSeconds / 3600, totalSeconds / 60 % 60,
+                  totalSeconds % 60, frames % fps_);
+    return text;
+}
+
+// A layer shows from its in point up to, not including, its out point; a layer
+// that runs to the end of the timeline also shows on the last frame.
+bool App::layerActive(const Layer& layer) const {
+    if (time_ < layer.inTime) return false;
+    return time_ < layer.outTime || (layer.outTime >= length_ && time_ >= length_);
+}
+
+void App::setTime(double seconds) {
+    time_ = std::clamp(seconds, 0.0, length_);
+}
+
+void App::setTimelineLength(double seconds) {
+    const double frame = 1.0 / fps_;
+    const double length = std::clamp(snapToFrame(seconds), frame, 24.0 * 3600.0);
+    for (Layer& layer : layers_) {
+        // Layers that ran to the old end keep running to the new end.
+        if (layer.outTime >= length_ - frame * 0.5) layer.outTime = length;
+        layer.outTime = std::min(layer.outTime, length);
+        layer.inTime = std::clamp(layer.inTime, 0.0, layer.outTime - frame);
+        layer.inTime = std::max(layer.inTime, 0.0);
+    }
+    length_ = length;
+    time_ = std::min(time_, length_);
+}
+
+void App::advanceTime() {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !io.WantTextInput && !ImGui::IsAnyItemActive())
+        playing_ = !playing_;
+    if (!playing_) return;
+    time_ += std::min((double)io.DeltaTime, 0.25);
+    if (time_ >= length_) {
+        if (loop_) {
+            time_ = std::fmod(time_, length_);
+        } else {
+            time_ = length_;
+            playing_ = false;
+        }
+    }
+}
+
+void App::drawTransport() {
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
+    if (ImGui::Button("|<")) time_ = 0.0;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to start");
+    ImGui::SameLine();
+    if (ImGui::Button(playing_ ? "Pause" : "Play", ImVec2(60, 0))) {
+        if (!playing_ && !loop_ && time_ >= length_) time_ = 0.0;
+        playing_ = !playing_;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play or pause (Space)");
+    ImGui::SameLine();
+    if (ImGui::Button("Stop")) {
+        playing_ = false;
+        time_ = 0.0;
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Loop", &loop_);
+    ImGui::SameLine(0, 18);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("%s", timecode(time_).c_str());
+    ImGui::SameLine();
+    ImGui::TextColored(kMutedColor, "/ %s", timecode(length_).c_str());
+
+    ImGui::SameLine(0, 18);
+    ImGui::TextUnformatted("Length");
+    ImGui::SameLine();
+    double length = length_;
+    ImGui::SetNextItemWidth(110);
+    if (ImGui::InputDouble("##length", &length, 1.0, 10.0, "%.2f s", ImGuiInputTextFlags_EnterReturnsTrue))
+        setTimelineLength(length);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Timeline length in seconds. Press Enter to apply.");
+
+    ImGui::SameLine();
+    ImGui::TextUnformatted("FPS");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70);
+    if (ImGui::BeginCombo("##fps", std::to_string(fps_).c_str())) {
+        for (int rate : {24, 25, 30, 50, 60}) {
+            if (ImGui::Selectable(std::to_string(rate).c_str(), fps_ == rate)) fps_ = rate;
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void App::drawTimeline() {
+    ImGui::Begin(kTimelineWindow);
+    drawTransport();
+    ImGui::Spacing();
+
+    const float labelWidth = 200.0f, rulerHeight = 24.0f, rowHeight = 26.0f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float trackX = origin.x + labelWidth;
+    const float trackWidth = std::max(50.0f, avail.x - labelWidth - 12.0f);
+    const auto timeToX = [&](double t) { return trackX + (float)(t / length_) * trackWidth; };
+    const auto xToTime = [&](float x) { return std::clamp((double)(x - trackX) / trackWidth * length_, 0.0, length_); };
+    const ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    // Ruler: click or drag to move the playhead.
+    ImGui::SetCursorScreenPos(ImVec2(trackX, origin.y));
+    ImGui::InvisibleButton("ruler", ImVec2(trackWidth, rulerHeight));
+    if (ImGui::IsItemActive()) time_ = snapToFrame(xToTime(io.MousePos.x));
+    drawList->AddRectFilled(ImVec2(trackX, origin.y), ImVec2(trackX + trackWidth, origin.y + rulerHeight),
+                            IM_COL32(36, 38, 44, 255));
+    double step = 1.0 / fps_;
+    for (double candidate : {1.0 / fps_, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+                             3600.0}) {
+        step = candidate;
+        if (candidate / length_ * trackWidth >= 80.0f) break;
+    }
+    for (int i = 0; i * step <= length_ + 1e-9; ++i) {
+        const double t = i * step;
+        const float x = timeToX(t);
+        drawList->AddLine(ImVec2(x, origin.y + rulerHeight - 8), ImVec2(x, origin.y + rulerHeight),
+                          IM_COL32(140, 145, 155, 255));
+        // Whole-second steps read as minutes:seconds, finer steps as seconds and frames.
+        const std::string code = timecode(t);
+        std::string label = code.substr(t >= 3600.0 ? 0 : 3, t >= 3600.0 ? 8 : 5);
+        if (step < 1.0) {
+            const long long frames = std::llround(t * fps_);
+            label = std::to_string(frames / fps_) + "s " + std::to_string(frames % fps_) + "f";
+        }
+        if (x + 3 + ImGui::CalcTextSize(label.c_str()).x <= trackX + trackWidth)
+            drawList->AddText(ImVec2(x + 3, origin.y + 3), IM_COL32(150, 155, 165, 255), label.c_str());
+        for (int minor = 1; minor < 5; ++minor) {
+            const double tm = t + step * minor / 5.0;
+            if (tm > length_) break;
+            const float xm = timeToX(tm);
+            drawList->AddLine(ImVec2(xm, origin.y + rulerHeight - 4), ImVec2(xm, origin.y + rulerHeight),
+                              IM_COL32(90, 95, 105, 255));
+        }
+    }
+
+    // One row per layer, top of the stack first, like the Layers panel.
+    const ImU32 channelColors[] = {IM_COL32(86, 130, 225, 255), IM_COL32(60, 175, 125, 255),
+                                   IM_COL32(215, 150, 60, 255), IM_COL32(180, 95, 200, 255),
+                                   IM_COL32(205, 85, 95, 255),  IM_COL32(70, 170, 190, 255),
+                                   IM_COL32(170, 170, 80, 255), IM_COL32(140, 140, 150, 255)};
+    float y = origin.y + rulerHeight + 4.0f;
+    const double frame = 1.0 / fps_;
+    for (int i = (int)layers_.size() - 1; i >= 0; --i) {
+        Layer& layer = layers_[i];
+        ImGui::PushID(layer.id);
+        const bool selected = layer.id == selectedLayer_;
+
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + 4, y));
+        if (!layer.visible) ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
+        if (ImGui::Selectable(layer.image.name.c_str(), selected, 0, ImVec2(labelWidth - 12, rowHeight - 4)))
+            selectedLayer_ = layer.id;
+        if (!layer.visible) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", placementLabel(layer.channel, layer.surface).c_str());
+
+        drawList->AddRectFilled(ImVec2(trackX, y), ImVec2(trackX + trackWidth, y + rowHeight - 2),
+                                IM_COL32(30, 31, 36, 255));
+        const float x0 = timeToX(layer.inTime), x1 = std::max(timeToX(layer.outTime), x0 + 2.0f);
+        ImGui::SetCursorScreenPos(ImVec2(trackX, y));
+        ImGui::InvisibleButton("track", ImVec2(trackWidth, rowHeight - 2));
+        const bool hovered = ImGui::IsItemHovered();
+        const float edge = 6.0f;
+        int hoverPart = 0;
+        if (hovered && io.MousePos.x >= x0 - edge && io.MousePos.x <= x1 + edge) {
+            if (io.MousePos.x <= x0 + edge) hoverPart = 1;
+            else if (io.MousePos.x >= x1 - edge) hoverPart = 3;
+            else hoverPart = 2;
+        }
+        if (hoverPart == 1 || hoverPart == 3 || (dragLayer_ == layer.id && dragPart_ != 2))
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        if (ImGui::IsItemActivated()) {
+            selectedLayer_ = layer.id;
+            if (hoverPart > 0) {
+                dragLayer_ = layer.id;
+                dragPart_ = hoverPart;
+                dragOffset_ = xToTime(io.MousePos.x) - layer.inTime;
+            }
+        }
+        if (dragLayer_ == layer.id && ImGui::IsItemActive()) {
+            const double t = xToTime(io.MousePos.x);
+            if (dragPart_ == 1) {
+                layer.inTime = std::clamp(snapToFrame(t), 0.0, layer.outTime - frame);
+            } else if (dragPart_ == 3) {
+                layer.outTime = std::clamp(snapToFrame(t), layer.inTime + frame, length_);
+            } else {
+                const double duration = layer.outTime - layer.inTime;
+                layer.inTime = std::clamp(snapToFrame(t - dragOffset_), 0.0, std::max(0.0, length_ - duration));
+                layer.outTime = layer.inTime + duration;
+            }
+        }
+        if (dragLayer_ == layer.id && !ImGui::IsItemActive()) dragLayer_ = -1;
+
+        ImU32 color = channelColors[std::clamp(layer.channel, 0, 7)];
+        if (!layer.visible) color = (color & 0x00FFFFFF) | 0x60000000;
+        drawList->AddRectFilled(ImVec2(x0, y + 2), ImVec2(x1, y + rowHeight - 4), color, 3.0f);
+        if (selected)
+            drawList->AddRect(ImVec2(x0, y + 2), ImVec2(x1, y + rowHeight - 4), IM_COL32(240, 240, 245, 255), 3.0f,
+                              0, 2.0f);
+        const std::string barText = channelLabel(layer.channel) + "  " + layer.image.name;
+        drawList->PushClipRect(ImVec2(x0 + 4, y), ImVec2(x1 - 4, y + rowHeight), true);
+        drawList->AddText(ImVec2(x0 + 6, y + 5), IM_COL32(255, 255, 255, 230), barText.c_str());
+        drawList->PopClipRect();
+        ImGui::PopID();
+        y += rowHeight;
+    }
+    if (layers_.empty()) {
+        drawList->AddText(ImVec2(trackX + 8, y + 4), IM_COL32(120, 125, 135, 255),
+                          "Layers appear here once you add images.");
+        y += rowHeight;
+    }
+
+    // Playhead across the ruler and every row.
+    const float px = timeToX(time_);
+    drawList->AddLine(ImVec2(px, origin.y), ImVec2(px, std::max(y, origin.y + avail.y)), IM_COL32(235, 80, 70, 255),
+                      2.0f);
+    drawList->AddTriangleFilled(ImVec2(px - 6, origin.y), ImVec2(px + 6, origin.y), ImVec2(px, origin.y + 8),
+                                IM_COL32(235, 80, 70, 255));
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, y));
+    ImGui::Dummy(ImVec2(1, 1));
     ImGui::End();
 }
 

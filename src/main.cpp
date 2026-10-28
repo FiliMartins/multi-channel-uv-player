@@ -2,7 +2,7 @@
 //
 // Usage: MultiChannelUVPlayer [mesh.fbx] [images or folders...]
 //        [--led | --mixed N,N...] [--grid N] [--wireframe]
-//        [--uv N[:S]] [--export out.png] [--size WxH] [--screenshot out.png]
+//        [--uv N[:S]] [--export out.png] [--length S] [--time S] [--size WxH] [--screenshot out.png]
 // --mixed sets Mixed mode with the listed surfaces (1-based) as LED.
 // --uv shows UV channel N in the UV view, optionally surface S (1-based); --export
 // saves that view's output as a PNG.
@@ -116,6 +116,7 @@ int main(int argc, char** argv) {
     bool mixed = false;
     int uvChannel = 0, uvSurface = 0;  // 1-based, 0 = default
     std::string exportPath;
+    double timelineLength = 0.0, startTime = 0.0;  // seconds, 0 = default
     bool wireframe = false;
     int windowWidth = 1600, windowHeight = 900;
     const std::vector<std::string> args = utf8Arguments(argc, argv);
@@ -127,6 +128,8 @@ int main(int argc, char** argv) {
         else if (arg == "--led") led = true;
         else if (arg == "--uv" && hasValue) std::sscanf(args[++i].c_str(), "%d:%d", &uvChannel, &uvSurface);
         else if (arg == "--export" && hasValue) exportPath = args[++i];
+        else if (arg == "--length" && hasValue) timelineLength = std::atof(args[++i].c_str());
+        else if (arg == "--time" && hasValue) startTime = std::atof(args[++i].c_str());
         else if (arg == "--mixed" && hasValue) {
             mixed = true;
             for (const char* p = args[++i].c_str(); *p;) {
@@ -172,7 +175,7 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
-    io.IniFilename = screenshotPath.empty() ? "imgui_layout_v3.ini" : nullptr;
+    io.IniFilename = screenshotPath.empty() ? "imgui_layout_v4.ini" : nullptr;
     setupStyle();
     loadFont();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -190,7 +193,9 @@ int main(int argc, char** argv) {
     glfwSetDropCallback(window, onDrop);
     if (led) app.setMode(MappingMode::Led);
     if (mixed) app.setMode(MappingMode::Mixed);
+    if (timelineLength > 0.0) app.setTimelineLength(timelineLength);
     for (const std::string& input : inputs) app.importPath(input);
+    app.setTime(startTime);
     for (int surface : mixedLed) app.setSurfaceLed(surface - 1, true);
     if (uvChannel > 0) app.showUvView(uvChannel - 1, uvSurface > 0 ? uvSurface - 1 : kAllSurfaces);
     if (!exportPath.empty()) app.exportOutputPng(exportPath);

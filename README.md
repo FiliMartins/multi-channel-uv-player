@@ -25,7 +25,9 @@ Every push builds a Windows version automatically. On GitHub, open **Actions →
 - **Timeline:** set the length (seconds) and frame rate (24, 25, 30, 50 or 60). Play, pause, stop, go to start and loop, with an hours:minutes:seconds:frames readout. Click or drag on the ruler to scrub. Each layer has a bar with in and out points: drag the bar to move it, or its edges to trim; everything snaps to frames. A layer shows only between its in and out points, in both the 3D and UV views. In and out can also be typed or set to the playhead in the layer's settings. When the length changes, bars that ran to the end keep running to the new end.
 - **Generators:** *Add generator...* in the Layers panel adds an animated pattern on the mapping shown in the UV view: Test pattern (grid, circles, colour bars and the mapping's name and size), Bugs (pixel dots running along rows and columns at different speeds, with trails), Chevron, Radar, Scan, Gradient, Noise and Numbered tiles. Each is drawn on the GPU at the mapping's pixel size and follows it when moved to another mapping (or at a size you type) and behaves like any other layer: blend mode, opacity, timeline in and out (the animation starts at the in point). Colours, speed, size, direction, trail and more are in the layer's settings; *See-through* leaves the background empty so layers below show.
 - **Distortion view:** in the UV view's Show menu, *Distortion: pixel density* colours the mapping by pixels per metre against the average (green even, blue down to half, red up to double) and *Distortion: stretch* by how far pixels are from square (green square, red 2x or more). The same view can be shown on the 3D mesh from its Show menu. The UV view lists the average density, the LED pixel pitch in mm, the range and the worst stretch, and the values under the cursor.
-- **Drag and drop** FBX files, images or folders onto the window.
+- **Mute:** the M button at the left of each timeline row hides or shows that layer (red when muted), the same as the tick in the Layers panel.
+- **Projects:** *File > Save project* (Ctrl+S) writes a `.mcuv` file with the mesh, mode, LED surfaces, channel settings, every layer (images and generators with all their settings), the timeline and both views. *Open project* (Ctrl+O), *Save project as* (Ctrl+Shift+S) and *New project* (Ctrl+N) are in the same menu. Media is not copied: the project stores each file's full path and its path relative to the project, so a project folder that moves together with its media opens as is. Files that are still not found stay in the stack as missing layers; *Locate folder...* under *Missing files* finds them by name in a folder and its subfolders. If the mesh itself has moved, the player asks for its folder and searches the media there too. The title bar and menu bar show unsaved changes, and New, Open and closing the window ask to save first.
+- **Drag and drop** projects, FBX files, images or folders onto the window.
 
 Supported images: PNG, JPG, TGA, BMP. Images larger than the GPU's texture limit (shown in the log) are refused with a message.
 
@@ -41,16 +43,19 @@ Supported images: PNG, JPG, TGA, BMP. Images larger than the GPU's texture limit
 | Play / pause | Space, or the Play button |
 | Scrub | Click or drag on the timeline ruler |
 | Move / trim a layer | Drag its timeline bar / the bar's edges |
+| Mute a layer | M at the left of its timeline row |
+| New / open / save / save as | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 
 ## Command line
 
 ```
-MultiChannelUVPlayer.exe [mesh.fbx] [images or folders...] [--led | --mixed N,N...] [--grid N] [--wireframe]
+MultiChannelUVPlayer.exe [project.mcuv | mesh.fbx] [images or folders...] [--led | --mixed N,N...] [--grid N] [--wireframe]
                          [--uv N[:S]] [--export out.png] [--length S] [--time S]
                          [--gen TYPE:N[:S]] [--distortion density|stretch]
+                         [--relink FOLDER] [--save project.mcuv]
 ```
 
-`--led` starts in LED mode. `--mixed 1,3` starts in Mixed mode with surfaces 1 and 3 set to LED. `--grid N` shows the test grid on UV channel N. `--uv 2` shows UV02 in the UV view (`--uv 1:3` shows UV01 of surface 3), and `--export out.png` saves that output. `--length 20` sets the timeline to 20 seconds and `--time 5` puts the playhead at 5 seconds. `--gen bugs:2` adds a Bugs generator on UV02 (types: testpattern, bugs, chevron, radar, scan, gradient, noise, tiles), and `--distortion density` shows the distortion view. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
+`--led` starts in LED mode. `--mixed 1,3` starts in Mixed mode with surfaces 1 and 3 set to LED. `--grid N` shows the test grid on UV channel N. `--uv 2` shows UV02 in the UV view (`--uv 1:3` shows UV01 of surface 3), and `--export out.png` saves that output. `--length 20` sets the timeline to 20 seconds and `--time 5` puts the playhead at 5 seconds. `--gen bugs:2` adds a Bugs generator on UV02 (types: testpattern, bugs, chevron, radar, scan, gradient, noise, tiles), and `--distortion density` shows the distortion view. `--relink FOLDER` relinks missing media from a folder and `--save project.mcuv` saves the result as a project. `--screenshot out.png` renders a few frames, saves the window and exits, which is used for automated checks.
 
 ## Building from source
 

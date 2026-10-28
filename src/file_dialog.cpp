@@ -35,7 +35,9 @@ std::string openFileDialog(FileKind kind) {
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = (DWORD)(sizeof(buffer) / sizeof(buffer[0]));
     ofn.lpstrFilter = kind == FileKind::Fbx ? L"FBX mesh (*.fbx)\0*.fbx\0All files\0*.*\0"
-                                            : L"Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All files\0*.*\0";
+                      : kind == FileKind::Project
+                          ? L"Player project (*.mcuv)\0*.mcuv\0All files\0*.*\0"
+                          : L"Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All files\0*.*\0";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) return {};
     return toUtf8(buffer);
@@ -64,7 +66,9 @@ std::string pickFolderDialog() {
     return result;
 }
 
-std::string savePngDialog(const std::string& suggestedName) {
+namespace {
+
+std::string saveDialog(const std::string& suggestedName, const wchar_t* filter, const wchar_t* extension) {
     wchar_t buffer[MAX_PATH * 4] = L"";
     const std::wstring suggested = toWide(suggestedName);
     if (suggested.size() < sizeof(buffer) / sizeof(buffer[0])) wcscpy_s(buffer, suggested.c_str());
@@ -72,11 +76,21 @@ std::string savePngDialog(const std::string& suggestedName) {
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = (DWORD)(sizeof(buffer) / sizeof(buffer[0]));
-    ofn.lpstrFilter = L"PNG image (*.png)\0*.png\0";
-    ofn.lpstrDefExt = L"png";
+    ofn.lpstrFilter = filter;
+    ofn.lpstrDefExt = extension;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetSaveFileNameW(&ofn)) return {};
     return toUtf8(buffer);
+}
+
+}  // namespace
+
+std::string saveProjectDialog(const std::string& suggestedName) {
+    return saveDialog(suggestedName, L"Player project (*.mcuv)\0*.mcuv\0", L"mcuv");
+}
+
+std::string savePngDialog(const std::string& suggestedName) {
+    return saveDialog(suggestedName, L"PNG image (*.png)\0*.png\0", L"png");
 }
 
 #else
@@ -86,5 +100,6 @@ std::string openFileDialog(FileKind) { return {}; }
 std::string pickFolderDialog() { return {}; }
 // Without a dialog the PNG goes to the working folder under the suggested name.
 std::string savePngDialog(const std::string& suggestedName) { return suggestedName; }
+std::string saveProjectDialog(const std::string& suggestedName) { return suggestedName; }
 
 #endif

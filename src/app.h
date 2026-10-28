@@ -38,6 +38,7 @@ struct Layer {
     bool visible = true;
     double inTime = 0.0;   // seconds on the timeline where the layer starts
     double outTime = 0.0;  // and where it ends
+    bool missing = false;  // the file was not found when the project opened
 };
 
 // A file the player could not place by its name; the user picks where it goes.
@@ -56,8 +57,22 @@ public:
     // Builds the UI and draws the 3D view for one frame.
     void frame();
 
-    // Accepts an .fbx, an image or a folder (from the command line, drag and drop or dialogs).
+    // Accepts a project, an .fbx, an image or a folder (from the command line, drag and drop or dialogs).
     void importPath(const std::string& path);
+
+    // Projects (app_project.cpp). A project file holds the mesh, layers, timeline and
+    // views; media is stored by path, also relative to the project, and can be relinked.
+    bool saveProject(const std::string& path);
+    bool openProject(const std::string& path, const std::string& searchFolder = "");
+    void newProject();
+    // Looks for missing media under a folder, by file name.
+    void relinkMissing(const std::string& folder);
+    // Opens a project after asking about unsaved changes.
+    void requestOpenProject(const std::string& path);
+    // Asks to save unsaved changes first; returns true when the app may close now.
+    bool requestClose();
+    bool quitConfirmed() const { return quitConfirmed_; }
+    std::string windowTitle() const;
     void openMesh(const std::string& path);
     void setMode(MappingMode mode);
     void setSurfaceLed(int surface, bool led);  // used in Mixed mode
@@ -121,6 +136,16 @@ private:
     std::vector<unsigned char> ledFlags() const;
     void renderOutput(bool wireframe, int& width, int& height, std::string& note);
     void drawLog();
+    void drawMenuBar();
+    void drawProjectPrompts();
+    void drawMissingSection();
+    void handleShortcuts();
+    void runAfterSaveCheck(int action);
+    void doPendingAction();
+    bool saveOrSaveAs();
+    std::string serializeProject(bool forChangeCheck) const;
+    void clearProject();
+    bool isDirty() const;
     void drawTimeline();
     void drawTransport();
     void advanceTime();
@@ -145,6 +170,17 @@ private:
     int nextLayerId_ = 1;
     int maxTextureSize_ = 4096;
     bool layoutBuilt_ = false;
+
+    // Project
+    std::string projectPath_;
+    std::string savedState_;           // project as last saved or opened, to spot unsaved changes
+    std::string pendingProjectPath_;   // project waiting for its mesh to be located
+    std::string missingMeshName_;
+    int pendingAction_ = 0;            // what to do after the unsaved-changes question
+    std::string pendingOpenPath_;
+    bool quitConfirmed_ = false;
+    mutable int dirtyCheckFrame_ = 0;
+    mutable bool dirtyCached_ = false;
 
     // Timeline
     double length_ = 60.0;  // seconds

@@ -33,8 +33,11 @@ FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5
     SOURCE_SUBDIR none)
+FetchContent_Declare(json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d)
 # imgui, ufbx and stb are plain sources: SOURCE_SUBDIR none fetches them without add_subdirectory.
-FetchContent_MakeAvailable(glfw imgui ufbx stb)
+FetchContent_MakeAvailable(glfw imgui ufbx stb json)
 
 add_library(glad STATIC third_party/glad/src/gl.c)
 target_include_directories(glad PUBLIC third_party/glad/include)
@@ -55,6 +58,7 @@ target_include_directories(ufbx PUBLIC ${ufbx_SOURCE_DIR})
 add_executable(MultiChannelUVPlayer
     src/main.cpp
     src/app.cpp
+    src/app_project.cpp
     src/mesh.cpp
     src/media.cpp
     src/renderer.cpp
@@ -64,7 +68,7 @@ add_executable(MultiChannelUVPlayer
     src/file_dialog.cpp
     src/stb_impl.cpp)
 target_include_directories(MultiChannelUVPlayer PRIVATE src ${stb_SOURCE_DIR})
-target_link_libraries(MultiChannelUVPlayer PRIVATE glad imgui ufbx glfw)
+target_link_libraries(MultiChannelUVPlayer PRIVATE glad imgui ufbx glfw nlohmann_json::nlohmann_json)
 
 if(WIN32)
     target_compile_definitions(MultiChannelUVPlayer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
